@@ -302,12 +302,42 @@ function AlertDetail({ alert }: { alert: Alert }) {
   );
 }
 function Dashboard({ notify }: { notify: (text: string) => void }) {
+  const [dates, setDates] = useState({ start: '', end: '' });
+  return (
+    <DashboardFeed
+      key={`${dates.start}|${dates.end}`}
+      notify={notify}
+      dates={dates}
+      onDates={setDates}
+    />
+  );
+}
+function DashboardFeed({
+  notify,
+  dates,
+  onDates,
+}: {
+  notify: (text: string) => void;
+  dates: { start: string; end: string };
+  onDates: (dates: { start: string; end: string }) => void;
+}) {
   const [data, setData] = useState<any>({ items: [], unread: 0 });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<Alert | null>(null);
   const [filter, setFilter] = useState('all');
-  const [search, setSearch] = useState('');
+  const [draftDates, setDraftDates] = useState(dates);
+  const alertUrl = useCallback(
+    (paging: Record<string, string | number> = {}) => {
+      const params = new URLSearchParams();
+      if (dates.start) params.set('startDate', dates.start);
+      if (dates.end) params.set('endDate', dates.end);
+      for (const [key, value] of Object.entries(paging)) params.set(key, String(value));
+      const query = params.toString();
+      return '/alerts' + (query ? '?' + query : '');
+    },
+    [dates.start, dates.end],
+  );
   const [more, setMore] = useState(true);
   const cursor = useRef(0);
   const inFlight = useRef(false);
@@ -318,10 +348,10 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      let next = await api('/alerts' + (cursor.current ? '?after=' + cursor.current : ''));
+      let next = await api(alertUrl(cursor.current ? { after: cursor.current } : {}));
       let incoming = next.items;
       while (next.hasMore) {
-        next = await api('/alerts?after=' + next.cursor);
+        next = await api(alertUrl({ after: next.cursor }));
         incoming = [...incoming, ...next.items];
       }
       cursor.current = next.cursor;
@@ -349,7 +379,7 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
       setLoading(false);
       inFlight.current = false;
     }
-  }, [notify]);
+  }, [notify, alertUrl]);
   useEffect(() => {
     refresh();
     const timer = setInterval(refresh, 30000);
@@ -366,11 +396,7 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
   }, [refresh]);
   const items: Alert[] = data.items.filter(
     (a: Alert) =>
-      (filter !== 'unread' || !a.is_read) &&
-      (filter !== 'seasoning' || a.payload.seasoning) &&
-      `${a.payload.food}${a.payload.region}${a.payload.factor}${a.payload.summary}`.includes(
-        search,
-      ),
+      (filter !== 'unread' || !a.is_read) && (filter !== 'seasoning' || a.payload.seasoning),
   );
   useEffect(() => {
     const timer = setInterval(() => {
@@ -400,6 +426,7 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
       setData((d: any) => ({
         ...d,
         unread: Math.max(0, d.unread - (a.is_read ? 0 : 1)),
+        filteredUnread: Math.max(0, (d.filteredUnread ?? d.unread) - (a.is_read ? 0 : 1)),
         items: d.items.map((x: Alert) => (x.id === a.id ? { ...x, is_read: 1 } : x)),
       }));
     } catch (e) {
@@ -544,20 +571,50 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
                     : v === 'seasoning'
                     ? data.counts?.seasoning ??
                       data.items.filter((a: Alert) => a.payload.seasoning).length
-                    : data.unread}
+                    : data.filteredUnread ?? data.unread}
                 </b>
               </button>
             ))}
           </div>
-          <div className="search">
-            <Search size={16} />
+          <form
+            className="date-filter"
+            aria-label="按预警发布时间筛选"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onDates(draftDates);
+            }}
+          >
+            <Clock3 size={14} />
+            <span>发布时间</span>
             <input
-              aria-label="搜索已载入预警"
-              placeholder="搜索食品、地区或风险…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              type="date"
+              aria-label="开始日期"
+              value={draftDates.start}
+              max={draftDates.end || undefined}
+              onChange={(e) => setDraftDates({ ...draftDates, start: e.target.value })}
             />
-          </div>
+            <span>至</span>
+            <input
+              type="date"
+              aria-label="结束日期"
+              value={draftDates.end}
+              min={draftDates.start || undefined}
+              onChange={(e) => setDraftDates({ ...draftDates, end: e.target.value })}
+            />
+            <button className="button primary" type="submit">
+              筛选
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => {
+                setDraftDates({ start: '', end: '' });
+                onDates({ start: '', end: '' });
+              }}
+            >
+              重置
+            </button>
+          </form>
         </div>
         {error && (
           <div className="error" role="alert">
@@ -633,7 +690,9 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
               {loading
                 ? '请稍候'
                 : data.items.length
-                ? '可以切换筛选条件或搜索关键词。'
+                ? '可以切换分类或调整时间范围。'
+                : dates.start || dates.end
+                ? '所选时间范围内暂无预警，可调整日期或重置筛选。'
                 : '后台完成新闻采集和分析后，预警将在这里展示。'}
             </p>
           </div>
@@ -643,7 +702,7 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
             className="button load-more"
             onClick={async () => {
               try {
-                const next = await api(`/alerts?before=${data.items.at(-1).id}`);
+                const next = await api(alertUrl({ before: data.items.at(-1).id }));
                 setData((d: any) => ({
                   ...d,
                   items: [

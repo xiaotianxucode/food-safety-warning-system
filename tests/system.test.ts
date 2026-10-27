@@ -172,6 +172,34 @@ describe('新闻与模型处理', () => {
   });
 });
 describe('登录、权限和提醒', () => {
+  it('按北京时间的起止日期筛选，分类数量与分页均限定在范围内', async () => {
+    addUser();
+    const id = addNews();
+    await analyzeNews(db, id, async () => validateAnalysis(output, body));
+    run(db, "UPDATE alerts SET published_at='2026-10-26T15:59:59.999Z' WHERE id=1");
+    run(db, "UPDATE alerts SET published_at='2026-10-27T15:59:59.999Z' WHERE id=2");
+    run(
+      db,
+      "INSERT INTO alerts(news_id,analysis_id,object_key,payload,published_at) SELECT news_id,analysis_id,'next-day',payload,'2026-10-27T16:00:00.000Z' FROM alerts WHERE id=1",
+    );
+    const agent = request.agent(createApp(db));
+    await agent.post('/api/login').send({ username: 'reader', password: 'test-password-2026' });
+    for (const paging of ['', '&after=1', '&before=3']) {
+      const res = (await agent.get('/api/alerts?startDate=2026-10-27&endDate=2026-10-27' + paging))
+        .body;
+      expect(res.items.map((a: any) => a.id)).toEqual([2]);
+      expect(res.counts).toEqual({ total: 1, seasoning: 1 });
+      expect(res.filteredUnread).toBe(1);
+    }
+    expect((await agent.get('/api/alerts?startDate=2026-10-27')).body.items).toHaveLength(2);
+    expect((await agent.get('/api/alerts?endDate=2026-10-27')).body.items).toHaveLength(2);
+    await agent.post('/api/alerts/2/read');
+    const read = (await agent.get('/api/alerts?startDate=2026-10-27&endDate=2026-10-27')).body;
+    expect(read.filteredUnread).toBe(0);
+    expect(read.unread).toBe(2);
+    await agent.get('/api/alerts?startDate=2026-10-28&endDate=2026-10-27').expect(400);
+    await agent.get('/api/alerts?startDate=2026-02-30').expect(400);
+  });
   it('超过一页的新预警按发布序号增量补齐', async () => {
     addUser();
     const id = addNews();

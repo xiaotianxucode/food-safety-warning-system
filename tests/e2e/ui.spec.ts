@@ -48,6 +48,13 @@ test('登录、查看分析、已读持久化、后台来源与移动端布局',
   await expect(page.getByRole('status')).toHaveCount(0);
   await page.getByRole('button', { name: '未读消息' }).click();
   await expect(page.getByRole('heading', { name: '暂时没有未读预警' })).toBeVisible();
+  await page.getByLabel('开始日期', { exact: true }).fill('2099-01-01');
+  await page.getByLabel('结束日期', { exact: true }).fill('2099-01-02');
+  await page.getByRole('button', { name: '筛选', exact: true }).click();
+  await expect(page.getByRole('button', { name: /全部预警/ }).locator('b')).toHaveText('0');
+  await expect(page.getByText('所选时间范围内暂无预警，可调整日期或重置筛选。')).toBeVisible();
+  await page.getByRole('button', { name: '重置', exact: true }).click();
+  await expect(page.getByRole('button', { name: /全部预警/ }).locator('b')).toHaveText('1');
   await page.getByRole('button', { name: '开发者后台' }).click();
   await page.getByRole('button', { name: '新闻数据库' }).click();
   await page.getByRole('button', { name: '查看详情' }).click();

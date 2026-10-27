@@ -129,22 +129,46 @@ export function createApp(db: DB, worker = new Worker(db)) {
   app.get('/api/alerts', (req, res) => {
     const after = z.coerce.number().int().min(0).default(0).parse(req.query.after);
     const before = z.coerce.number().int().min(1).optional().parse(req.query.before);
+    const dateSchema = z.iso.date().optional();
+    const startDate = dateSchema.parse(req.query.startDate);
+    const endDate = dateSchema.parse(req.query.endDate);
+    if (startDate && endDate && startDate > endDate)
+      return res.status(400).json({ error: '开始日期不能晚于结束日期' });
+    const rangeParts: string[] = [];
+    const rangeArgs: string[] = [];
+    if (startDate) {
+      rangeParts.push('a.published_at>=?');
+      rangeArgs.push(new Date(`${startDate}T00:00:00+08:00`).toISOString());
+    }
+    if (endDate) {
+      rangeParts.push('a.published_at<?');
+      rangeArgs.push(new Date(Date.parse(`${endDate}T00:00:00+08:00`) + 86400_000).toISOString());
+    }
+    const rangeSql = rangeParts.length ? ' AND ' + rangeParts.join(' AND ') : '';
     const items = all(
       db,
       `SELECT a.*, CASE WHEN r.alert_id IS NULL THEN 0 ELSE 1 END AS is_read FROM alerts a LEFT JOIN reads r ON r.alert_id=a.id AND r.user_id=? WHERE a.withdrawn=0 AND a.id>? ${
         before ? 'AND a.id<?' : ''
-      } ORDER BY a.id ${after > 0 ? 'ASC' : 'DESC'} LIMIT 100`,
+      } ${rangeSql} ORDER BY a.id ${after > 0 ? 'ASC' : 'DESC'} LIMIT 100`,
       req.user!.id,
       after,
       ...(before ? [before] : []),
+      ...rangeArgs,
     ).map(serialize);
     const job = one(db, 'SELECT status,started_at,finished_at FROM jobs ORDER BY id DESC LIMIT 1');
     res.json({
       items,
       counts: one(
         db,
-        "SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN json_extract(payload,'$.seasoning')=1 THEN 1 ELSE 0 END),0) AS seasoning FROM alerts WHERE withdrawn=0",
+        `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN json_extract(a.payload,'$.seasoning')=1 THEN 1 ELSE 0 END),0) AS seasoning FROM alerts a WHERE a.withdrawn=0 ${rangeSql}`,
+        ...rangeArgs,
       ),
+      filteredUnread: one(
+        db,
+        `SELECT COUNT(*) AS count FROM alerts a WHERE a.withdrawn=0 AND NOT EXISTS(SELECT 1 FROM reads r WHERE r.alert_id=a.id AND r.user_id=?) ${rangeSql}`,
+        req.user!.id,
+        ...rangeArgs,
+      )!.count,
       readIds: all(db, 'SELECT alert_id FROM reads WHERE user_id=?', req.user!.id).map(
         (r) => r.alert_id,
       ),

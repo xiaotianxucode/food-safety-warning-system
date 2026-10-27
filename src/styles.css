@@ -538,11 +538,49 @@ button:hover:not(:disabled) {
 }
 .feed-toolbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid #edf0ed;
   padding: 0 25px 15px;
   gap: 15px;
+}
+.date-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #8a9a8e;
+  font-size: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+.date-filter input {
+  width: 116px;
+  margin: 0;
+  padding: 7px 6px;
+  font-size: 10px;
+  min-width: 0;
+}
+.date-filter .button {
+  padding: 7px 10px;
+  font-size: 10px;
+}
+@media (max-width: 760px) {
+  .date-filter {
+    width: 100%;
+    gap: 5px;
+  }
+  .date-filter > span:first-of-type {
+    width: 100%;
+    margin-bottom: 3px;
+  }
+  .date-filter input {
+    flex: 1;
+    width: 100px;
+  }
+  .date-filter .text-button {
+    font-size: 10px;
+  }
 }
 .tabs {
   display: flex;
