@@ -84,7 +84,7 @@ test('模型分析重置预览、取消、空范围保护及跨页面清除旧�
   await feed.goto('/');
   await expect(feed.getByRole('heading', { name: '日本 · 草莓' })).toBeVisible();
   await page.getByRole('button', { name: '开发者后台' }).click();
-  await page.getByRole('button', { name: '新闻数据库' }).click();
+  await page.getByRole('button', { name: '任务中心' }).click();
   await page.getByRole('button', { name: '模型分析重置', exact: true }).click();
   let dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('将删除全部预警 1 条');
@@ -102,11 +102,41 @@ test('模型分析重置预览、取消、空范围保护及跨页面清除旧�
   await dialog.screenshot({ path: 'test-results/reset-dialog.png' });
   await dialog.getByRole('button', { name: '确认重置并重新分析' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.locator('.reset-progress')).toContainText('已处理 1 / 1');
-  await expect(page.locator('.reset-progress')).toContainText('成功 1');
+  await expect(page.getByText(/重置已处理 1 \/ 1/).first()).toBeVisible();
   await page.screenshot({ path: 'test-results/reset-progress.png', fullPage: true });
   await feed.getByRole('button', { name: '刷新动态' }).click();
   await expect(feed.getByRole('button', { name: /全部预警/ }).locator('b')).toHaveText('0');
   await expect(feed.getByRole('heading', { name: '日本 · 草莓' })).toHaveCount(0);
   await feed.close();
+});
+test('任务中心详情和采集配置、提示词独立保存', async ({ page }) => {
+  await page.goto('/');
+  await page.getByPlaceholder('请输入账号').fill('e2eadmin');
+  await page.getByPlaceholder('请输入密码').fill('e2e-password-only');
+  await page.getByRole('button', { name: '登录系统' }).click();
+  await page.getByRole('button', { name: '开发者后台' }).click();
+  await page.getByRole('button', { name: '任务中心', exact: true }).click();
+  await expect(page.getByRole('button', { name: '立即采集', exact: true })).toHaveCount(1);
+  await page.getByRole('button', { name: '任务详情', exact: true }).first().click();
+  await expect(page.getByRole('dialog', { name: /任务详情/ })).toContainText('重置已处理');
+  await page.getByRole('button', { name: '关闭任务详情' }).click();
+  await page.getByRole('button', { name: '采集与模型', exact: true }).click();
+  await expect(page.getByText('回溯范围（天）', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('单次处理上限（篇）', { exact: true })).toHaveCount(0);
+  const original = (await (await page.request.get('/api/admin/config')).json()).prompt.content;
+  const prompt = page.getByLabel(/系统提示词/);
+  await prompt.fill(original + '\n浏览器未保存修改。');
+  await page.getByRole('button', { name: '保存采集配置', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('采集配置已保存');
+  expect((await (await page.request.get('/api/admin/config')).json()).prompt.content).toBe(
+    original,
+  );
+  await expect(prompt).toHaveValue(original + '\n浏览器未保存修改。');
+  await page.getByRole('button', { name: '保存提示词', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('提示词已保存');
+  expect((await (await page.request.get('/api/admin/config')).json()).prompt.content).toBe(
+    original + '\n浏览器未保存修改。',
+  );
+  await page.getByRole('button', { name: '任务中心', exact: true }).click();
+  await page.screenshot({ path: 'test-results/task-center.png', fullPage: true });
 });

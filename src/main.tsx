@@ -24,6 +24,7 @@ import {
   Globe2,
 } from 'lucide-react';
 import './styles.css';
+import { TaskCenter } from './tasks';
 type User = { id: number; username: string; role: string };
 type Alert = {
   id: number;
@@ -88,6 +89,17 @@ const statusNames: Record<string, string> = {
   manual: '手动采集',
   retry: '失败重试',
   analysis_reset: '模型分析重置',
+  model_retry: '模型失败重试',
+  crawl_retry: '正文失败重试',
+  scanning: '扫描栏目',
+  collecting: '读取正文',
+  finished: '已完成',
+  new: '新增入库',
+  outside: '时间范围外',
+  date_unknown: '发布时间待确认',
+  read_failed: '正文失败',
+  warning: '需要预警',
+  none: '未投入分析',
   reset_excluded: '未纳入本次重置',
 };
 function Modal({
@@ -470,7 +482,7 @@ function DashboardFeed({
         </div>
         <div className="page-actions">
           <span className="muted">
-            <Clock3 size={15} /> 每 {data.intervalHours || 12} 小时自动采集
+            <Clock3 size={15} /> 每 {data.intervalHours || 24} 小时自动采集
           </span>
           <button className="button" onClick={refresh}>
             <RefreshCw size={15} />
@@ -803,6 +815,24 @@ function Admin({ notify }: { notify: (s: string) => void }) {
   const [createUser, setCreateUser] = useState(false);
   const [resetUser, setResetUser] = useState<any>();
   const [resetOpen, setResetOpen] = useState(false);
+  const saveSettings = async (part: 'crawler' | 'prompt') => {
+    setBusy(true);
+    try {
+      const result = await send(
+        '/admin/config',
+        part === 'crawler'
+          ? { crawler: { sources: settings.crawler.sources } }
+          : { prompt: settings.prompt.content },
+        'PUT',
+      );
+      if (part === 'prompt') setSettings((s: any) => ({ ...s, prompt: result.prompt }));
+      notify(part === 'crawler' ? '采集配置已保存' : '提示词已保存，后续分析生效');
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const load = useCallback(async () => {
     try {
       setOverview(await api('/admin/overview'));
@@ -843,20 +873,10 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           <h1>开发者工作台</h1>
           <p>管理信息来源与分析流程，让每一条预警可追溯。</p>
         </div>
-        <button
-          disabled={busy || overview?.busy}
-          className="button primary"
-          onClick={() =>
-            action(() => send('/admin/collect'), '采集任务已提交，可在运行记录查看进度。')
-          }
-        >
-          <RefreshCw size={16} className={overview?.busy ? 'spin' : ''} />
-          {overview?.busy ? '任务执行中' : '立即采集'}
-        </button>
       </div>
       <div className="admin-tabs">
         {[
-          ['overview', '运行概览', LayoutDashboard],
+          ['overview', '任务中心', LayoutDashboard],
           ['news', '新闻数据库', Database],
           ['alerts', '预警管理', ShieldCheck],
           ['settings', '采集与模型', Settings2],
@@ -877,80 +897,13 @@ function Admin({ notify }: { notify: (s: string) => void }) {
       </div>
       {error && <div className="error">{error}</div>}
       {tab === 'overview' && (
-        <>
-          <div className="metrics admin-metrics">
-            <Metric
-              icon={<Database />}
-              label="已收录新闻"
-              value={overview?.news ?? '—'}
-              suffix="篇"
-            />
-            <Metric
-              icon={<ShieldCheck />}
-              label="已发布预警"
-              value={overview?.alerts ?? '—'}
-              suffix="条"
-              accent
-            />
-            <Metric
-              icon={<AlertTriangle />}
-              label="待重试新闻"
-              value={overview?.failed ?? '—'}
-              suffix="篇"
-            />
-            <Metric icon={<Users />} label="启用账号" value={overview?.users ?? '—'} suffix="个" />
-          </div>
-          <section className="panel">
-            <div className="section-heading">
-              <h2>任务运行记录</h2>
-              <span className="muted">每 10 秒更新</span>
-            </div>
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>任务</th>
-                    <th>开始时间</th>
-                    <th>状态</th>
-                    <th>处理结果 / 错误</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {overview?.jobs.map((j: any) => (
-                    <tr key={j.id}>
-                      <td>
-                        #{j.id} · {statusNames[j.kind] || j.kind}
-                      </td>
-                      <td>{fmt(j.started_at)}</td>
-                      <td>
-                        <Status value={j.status} />
-                      </td>
-                      <td>
-                        {j.summary &&
-                          (() => {
-                            const s = JSON.parse(j.summary);
-                            return j.kind === 'analysis_reset' ? (
-                              <p>
-                                已处理 {s.processed} / {s.total} · 成功 {s.completed} · 失败{' '}
-                                {s.failed} · 清除旧预警 {s.deletedAlerts} 条
-                              </p>
-                            ) : (
-                              <p>
-                                发现 {s.discovered} · 抓取 {s.processed} · 新增 {s.added} · 分析{' '}
-                                {s.analyzed}
-                              </p>
-                            );
-                          })()}
-                        {j.error && <pre className="inline-error">{j.error}</pre>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {!overview?.jobs.length && <Empty text="暂无运行记录，点击“立即采集”开始。" />}
-          </section>
-        </>
+        <TaskCenter
+          overview={overview}
+          busy={busy}
+          onCollect={() => action(() => send('/admin/collect'), '采集任务已提交')}
+          onRetry={() => action(() => send('/admin/retry-failed'), '模型失败重试任务已提交')}
+          onReset={() => setResetOpen(true)}
+        />
       )}
       {tab === 'news' && (
         <section className="panel">
@@ -959,14 +912,10 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               新闻数据库 <span>{news.total} 篇</span>
             </h2>
             <div className="news-toolbar">
-              <button
-                className="button danger-outline"
-                disabled={busy || overview?.busy}
-                onClick={() => setResetOpen(true)}
-              >
-                <RefreshCw size={15} />
-                模型分析重置
+              <button className="button" onClick={() => setTab('overview')}>
+                前往任务中心
               </button>
+
               <div className="search">
                 <Search size={16} />
                 <input
@@ -980,7 +929,6 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               </div>
             </div>
           </div>
-          {overview?.latestReset && <ResetProgress job={overview.latestReset} />}
           <div className="table-scroll">
             <table>
               <thead>
@@ -1104,49 +1052,16 @@ function Admin({ notify }: { notify: (s: string) => void }) {
         </section>
       )}
       {tab === 'settings' && settings && (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            action(
-              () =>
-                send(
-                  '/admin/config',
-                  { crawler: settings.crawler, prompt: settings.prompt.content },
-                  'PUT',
-                ),
-              '配置已保存，提示词将在后续分析中生效',
-            );
-          }}
-        >
+        <div>
           <section className="panel">
             <div className="section-heading">
               <h2>采集配置</h2>
               <span className="tag green">食品伙伴网</span>
             </div>
-            <div className="form-grid">
-              {[
-                ['intervalHours', '采集间隔（小时）', 1, 168],
-                ['lookbackDays', '回溯范围（天）', 1, 365],
-                ['maxArticles', '单次处理上限（篇）', 1, 1000],
-              ].map(([key, label, min, max]) => (
-                <label key={key}>
-                  {label}
-                  <input
-                    type="number"
-                    min={min}
-                    max={max}
-                    required
-                    value={settings.crawler[key]}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        crawler: { ...settings.crawler, [key]: Number(e.target.value) },
-                      })
-                    }
-                  />
-                </label>
-              ))}
-            </div>
+            <p className="muted">
+              自动采集周期：24
+              小时。首次覆盖近三个月，后续从上次成功采集截止时刻到本次触发时刻；按窗口自动翻页，不设篇数上限。
+            </p>
             <label>
               来源栏目（每行一个食品伙伴网链接）
               <textarea
@@ -1161,6 +1076,16 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               />
             </label>
             <p className="muted">遇到访问限制会记录失败；已采集正文按指纹合并，保留各来源链接。</p>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="button primary"
+                disabled={busy}
+                onClick={() => saveSettings('crawler')}
+              >
+                保存采集配置
+              </button>
+            </div>
           </section>
           <section className="panel">
             <div className="section-heading">
@@ -1206,12 +1131,17 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               >
                 测试已保存配置
               </button>
-              <button className="button primary" disabled={busy}>
-                保存配置
+              <button
+                type="button"
+                className="button primary"
+                disabled={busy}
+                onClick={() => saveSettings('prompt')}
+              >
+                保存提示词
               </button>
             </div>
           </section>
-        </form>
+        </div>
       )}
       {tab === 'users' && (
         <section className="panel">
@@ -1387,33 +1317,6 @@ function Admin({ notify }: { notify: (s: string) => void }) {
         </Modal>
       )}
     </>
-  );
-}
-function ResetProgress({ job }: { job: any }) {
-  const progress = JSON.parse(job.summary || '{}');
-  return (
-    <div className="reset-progress">
-      <div>
-        <strong>模型分析重置 #{job.id}</strong>
-        <Status value={job.status} />
-        <span>
-          已处理 {progress.processed || 0} / {progress.total || 0} 篇 · 成功{' '}
-          {progress.completed || 0} · 失败 {progress.failed || 0}
-        </span>
-      </div>
-      <progress value={progress.processed || 0} max={progress.total || 1} />
-      <small>
-        {progress.since
-          ? '新闻发布时间不早于 ' +
-            new Date(progress.since).toLocaleString('zh-CN', {
-              timeZone: 'Asia/Shanghai',
-              hour12: false,
-            })
-          : '范围：全部正文完整的文章'}{' '}
-        · 提示词 v{progress.promptId} · 清除旧预警 {progress.deletedAlerts || 0} 条
-      </small>
-      {job.error && <p className="inline-error">{job.error}</p>}
-    </div>
   );
 }
 function AnalysisResetDialog({

@@ -332,6 +332,54 @@ describe('新闻与模型处理', () => {
   });
 });
 describe('登录、权限和提醒', () => {
+  it('配置分开保存、删除旧限制、模型失败批量重试及任务接口鉴权', async () => {
+    addUser();
+    addUser('developer', 'developer');
+    const worker = new Worker(
+      db,
+      async () => '<html/>',
+      async () => ({ shouldWarn: false, summary: '重试后无需预警', alerts: [] }),
+    );
+    const app = createApp(db, worker);
+    const admin = request.agent(app);
+    const user = request.agent(app);
+    await admin.post('/api/login').send({ username: 'developer', password: 'test-password-2026' });
+    await user.post('/api/login').send({ username: 'reader', password: 'test-password-2026' });
+    await user.get('/api/admin/jobs').expect(403);
+    await user.post('/api/admin/retry-failed').expect(403);
+    const original = (await admin.get('/api/admin/config')).body;
+    await admin
+      .put('/api/admin/config')
+      .send({
+        crawler: {
+          sources: original.crawler.sources,
+          lookbackDays: 1,
+          maxArticles: 1,
+          intervalHours: 12,
+        },
+      })
+      .expect(200);
+    const cfg = (await admin.get('/api/admin/config')).body;
+    expect(cfg.crawler).toEqual({ intervalHours: 24, sources: original.crawler.sources });
+    expect(cfg.prompt.content).toBe(original.prompt.content);
+    await admin
+      .put('/api/admin/config')
+      .send({ prompt: original.prompt.content + '\n独立保存测试。' })
+      .expect(200);
+    expect((await admin.get('/api/admin/config')).body.crawler).toEqual(cfg.crawler);
+    await admin.post('/api/admin/retry-failed').expect(400);
+    const id = addNews();
+    run(db, "UPDATE news SET status='analysis_failed' WHERE id=?", id);
+    const before = one(db, "SELECT value FROM settings WHERE key='crawlState'")!.value;
+    const response = await admin.post('/api/admin/retry-failed').expect(202);
+    await worker.stop();
+    expect(one(db, "SELECT value FROM settings WHERE key='crawlState'")!.value).toBe(before);
+    const jobs = (await admin.get('/api/admin/jobs?kind=model_retry&status=completed')).body;
+    expect(jobs.total).toBe(1);
+    const detail = (await admin.get(`/api/admin/jobs/${response.body.jobId}`)).body;
+    expect(detail.items).toHaveLength(1);
+    expect(detail.items[0].model_status).toBe('no_warning');
+  });
   it('重置仅开发者可用，要求确认，校验时间且异步返回进度', async () => {
     addUser();
     addUser('developer', 'developer');

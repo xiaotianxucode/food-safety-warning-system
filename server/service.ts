@@ -2,15 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { all, one, run, transaction, now, type DB } from './db.js';
 import { DEFAULT_PROMPT, LEGACY_PROMPT_HASH } from './prompt.js';
 import { callModel, modelName, validateAnalysis } from './model.js';
-import {
-  canonicalUrl,
-  DEFAULT_SOURCES,
-  extractArticle,
-  extractLinks,
-  fetchHtml,
-  fingerprint,
-} from './crawler.js';
-import * as cheerio from 'cheerio';
+import { canonicalUrl, DEFAULT_SOURCES, fetchHtml, fingerprint } from './crawler.js';
+import { createTask, executeTask, crawlState, saveCrawlState, DAY } from './collection.js';
 export function initialize(db: DB) {
   if (!one(db, 'SELECT id FROM prompts LIMIT 1'))
     run(db, 'INSERT INTO prompts(content,created_at) VALUES(?,?)', DEFAULT_PROMPT, now());
@@ -28,13 +21,23 @@ export function initialize(db: DB) {
       'INSERT INTO settings VALUES(?,?)',
       'crawler',
       JSON.stringify({
-        intervalHours: 12,
-        lookbackDays: 7,
-        maxArticles: 200,
+        intervalHours: 24,
         sources: DEFAULT_SOURCES,
       }),
     );
   run(db, 'INSERT OR IGNORE INTO migrations(version,applied_at) VALUES(3,?)', now());
+  if (!one(db, 'SELECT version FROM migrations WHERE version=4'))
+    transaction(db, () => {
+      const cfg = JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawler'")!.value);
+      setSetting(db, 'crawler', { intervalHours: 24, sources: cfg.sources });
+      const hasHistory = !!one(db, 'SELECT id FROM jobs LIMIT 1');
+      saveCrawlState(db, {
+        initialized: false,
+        lastSuccessEnd: null,
+        nextRunAt: new Date(Date.now() + (hasHistory ? DAY : 0)).toISOString(),
+      });
+      run(db, 'INSERT INTO migrations(version,applied_at) VALUES(4,?)', now());
+    });
 }
 export const config = (db: DB) =>
   JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawler'")!.value);
@@ -51,10 +54,11 @@ export function ingest(
   db: DB,
   article: { title: string; body: string; publishedAt: string | null },
   url: string,
+  withinTransaction = false,
 ) {
   url = canonicalUrl(url);
   const hash = fingerprint(article.body);
-  return transaction(db, () => {
+  const write = () => {
     const existing = one(db, 'SELECT * FROM news WHERE fingerprint=?', hash);
     const source = one(db, 'SELECT * FROM sources WHERE url=?', url);
     if (existing) {
@@ -98,7 +102,8 @@ export function ingest(
     );
     run(db, 'INSERT INTO sources(news_id,url,title) VALUES(?,?,?)', id, url, article.title);
     return { id, inserted: true };
-  });
+  };
+  return withinTransaction ? write() : transaction(db, write);
 }
 export async function analyzeNews(db: DB, id: number, analyzer = callModel, promptId?: number) {
   const news = one(db, 'SELECT * FROM news WHERE id=?', id);
@@ -172,6 +177,7 @@ export class Worker {
   private timer?: ReturnType<typeof setInterval>;
   private active?: Promise<void>;
   private owner = randomUUID();
+  jobId?: number;
   constructor(
     public db: DB,
     private fetcher = fetchHtml,
@@ -189,6 +195,17 @@ export class Worker {
   }
   canAnalyze() {
     return this.analyzer !== callModel || !!process.env.MODEL_API_KEY;
+  }
+  hasUnfinishedTask() {
+    return all(
+      this.db,
+      "SELECT kind,status,summary FROM jobs WHERE status IN ('running','interrupted')",
+    ).some(
+      (j) =>
+        j.status === 'running' ||
+        j.kind === 'analysis_reset' ||
+        JSON.parse(j.summary || '{}').version === 2,
+    );
   }
   resetPreview(since?: string) {
     const condition =
@@ -210,7 +227,7 @@ export class Worker {
   }
   resetAnalysis(since?: string) {
     if (!this.canAnalyze()) throw new Error('请先配置模型 API 密钥，未清除任何预警');
-    if (!this.acquire()) return undefined;
+    if (this.hasUnfinishedTask() || !this.acquire()) return undefined;
     try {
       if (
         one(
@@ -290,18 +307,16 @@ export class Worker {
   }
   tick() {
     if (this.busy) return;
-    const cfg = config(this.db);
-    const last = one(this.db, 'SELECT started_at FROM jobs ORDER BY id DESC LIMIT 1');
-    const unfinished =
-      one(
-        this.db,
-        "SELECT id FROM jobs WHERE status='running' OR (kind='analysis_reset' AND status='interrupted') LIMIT 1",
-      ) || one(this.db, "SELECT id FROM news WHERE status IN ('pending','analyzing') LIMIT 1");
-    if (
-      unfinished ||
-      !last ||
-      Date.now() - Date.parse(last.started_at) >= cfg.intervalHours * 3600_000
-    )
+    const unfinished = all(
+      this.db,
+      "SELECT * FROM jobs WHERE status IN ('running','interrupted')",
+    ).find(
+      (j) =>
+        j.status === 'running' ||
+        j.kind === 'analysis_reset' ||
+        JSON.parse(j.summary || '{}').version === 2,
+    );
+    if (unfinished || Date.parse(crawlState(this.db).nextRunAt) <= Date.now())
       this.launch('scheduled');
   }
   launch(kind = 'manual', retryId?: number) {
@@ -339,6 +354,7 @@ export class Worker {
     });
   }
   private async executeReset(jobId: number) {
+    this.jobId = jobId;
     const db = this.db;
     const job = one(db, 'SELECT * FROM jobs WHERE id=?', jobId)!;
     const summary = JSON.parse(job.summary);
@@ -466,159 +482,57 @@ export class Worker {
           new Date(Date.now() + 180_000).toISOString(),
           this.owner,
         ),
-      30_000,
+      30000,
     );
-    run(
-      db,
-      "UPDATE jobs SET status='interrupted',finished_at=?,error='服务中断，已恢复待处理任务' WHERE status='running'",
-      now(),
-    );
-    run(db, "UPDATE analyses SET status='interrupted',finished_at=? WHERE status='running'", now());
-    run(db, "UPDATE news SET status='pending' WHERE status='analyzing'");
-    const jobId = Number(
-      run(db, "INSERT INTO jobs(kind,status,started_at) VALUES(?,'running',?)", kind, now())
-        .lastInsertRowid,
-    );
-    const errors: string[] = [];
-    let added = 0,
-      processed = 0;
     try {
-      const cfg = config(db);
-      const cutoff = Date.now() - cfg.lookbackDays * 86400_000;
-      let links: string[] = [];
-      if (retryId) {
-        const n = one(db, 'SELECT * FROM news WHERE id=?', retryId);
-        if (!n) throw new Error('新闻不存在');
-        if (n.body)
+      const unfinished = all(
+        db,
+        "SELECT * FROM jobs WHERE kind<>'analysis_reset' AND status IN ('running','interrupted') ORDER BY id",
+      );
+      const resumable = unfinished.find((j) => JSON.parse(j.summary || '{}').version === 2);
+      if (resumable) this.jobId = resumable.id;
+      else {
+        const legacy = unfinished.filter((j) => j.status === 'running');
+        for (const j of legacy)
           run(
             db,
-            "UPDATE news SET status='pending',error=NULL WHERE id=? AND status IN ('analysis_failed','pending','analyzing')",
-            retryId,
+            "UPDATE jobs SET status='interrupted',finished_at=?,error='旧版中断任务已迁入新执行器' WHERE id=?",
+            now(),
+            j.id,
           );
-        else links = all(db, 'SELECT url FROM sources WHERE news_id=?', retryId).map((s) => s.url);
-      } else {
-        for (const source of cfg.sources) {
-          try {
-            let page = source;
-            const visited = new Set<string>();
-            for (let p = 0; p < 10 && page; p++) {
-              if (visited.has(page)) break;
-              visited.add(page);
-              const html = await this.fetcher(page);
-              links.push(...extractLinks(html, page));
-              const $ = cheerio.load(html);
-              let next = '';
-              $('a[href]').each((_, a) => {
-                if (!next && /^(下一页|下页|Next\s*[>»]?)$/i.test($(a).text().trim())) {
-                  try {
-                    next = canonicalUrl($(a).attr('href')!, page);
-                  } catch {}
-                }
-              });
-              page = next;
-              if (page) await sleep(800);
-            }
-          } catch (e) {
-            errors.push(e instanceof Error ? e.message : '栏目采集失败');
-          }
-        }
-        links.push(
-          ...all(
+        let ids: number[] | undefined;
+        if (kind === 'retry' && retryId) {
+          const n = one(db, 'SELECT * FROM news WHERE id=?', retryId)!;
+          kind = n.body ? 'model_retry' : 'crawl_retry';
+          ids = [retryId];
+        } else if (kind === 'model_retry')
+          ids = all(
             db,
-            "SELECT s.url FROM sources s JOIN news n ON n.id=s.news_id WHERE n.status='crawl_failed' LIMIT ?",
-            cfg.maxArticles,
-          ).map((s) => s.url),
-        );
-      }
-      const candidates = [...new Set(links)];
-      for (const url of candidates) {
-        if (processed >= cfg.maxArticles) break;
-        const previous = one(
-          db,
-          'SELECT n.* FROM sources s JOIN news n ON n.id=s.news_id WHERE s.url=?',
-          url,
-        );
-        if (previous && previous.status !== 'crawl_failed') continue;
-        processed++;
-        try {
-          let article: ReturnType<typeof extractArticle> | undefined;
-          let failure: unknown;
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-              article = extractArticle(await this.fetcher(url));
-              break;
-            } catch (e) {
-              failure = e;
-              if (attempt < 3) await sleep(1000 * attempt);
-            }
-          }
-          if (!article) throw failure;
-          if (!retryId && article.publishedAt && Date.parse(article.publishedAt) < cutoff) continue;
-          if (ingest(db, article, url).inserted) added++;
-        } catch (e) {
-          const error = e instanceof Error ? e.message : '新闻采集失败';
-          errors.push(error);
-          if (previous) run(db, 'UPDATE news SET error=? WHERE id=?', error, previous.id);
-          else
-            transaction(db, () => {
-              const id = Number(
-                run(
-                  db,
-                  "INSERT INTO news(title,status,error,created_at) VALUES(?,'crawl_failed',?,?)",
-                  url,
-                  error,
-                  now(),
-                ).lastInsertRowid,
-              );
-              run(
-                db,
-                'INSERT OR IGNORE INTO sources(news_id,url,title) VALUES(?,?,?)',
-                id,
-                url,
-                url,
-              );
-            });
-        }
-        await sleep(800);
-      }
-      const pending = retryId
-        ? all(db, "SELECT id FROM news WHERE id=? AND status='pending'", retryId)
-        : all(
+            "SELECT id FROM news WHERE status='analysis_failed' AND trim(body)<>'' ORDER BY id",
+          ).map((n) => n.id);
+        else if (legacy.length) {
+          ids = all(
             db,
-            "SELECT id FROM news WHERE status='pending' ORDER BY id LIMIT ?",
-            cfg.maxArticles,
-          );
-      for (const n of pending) {
-        await analyzeNews(db, n.id, this.analyzer);
-        const failure = one(
-          db,
-          "SELECT error FROM news WHERE id=? AND status='analysis_failed'",
-          n.id,
-        );
-        if (failure) errors.push(failure.error);
+            "SELECT id FROM news WHERE status IN ('pending','analyzing') AND trim(body)<>''",
+          ).map((n) => n.id);
+          if (ids.length) kind = 'model_retry';
+        }
+        this.jobId = createTask(db, kind, ids);
       }
-      run(
-        db,
-        'UPDATE jobs SET status=?,finished_at=?,error=?,summary=? WHERE id=?',
-        errors.length ? 'partial_failed' : 'completed',
-        now(),
-        errors.slice(0, 20).join('\n') || null,
-        JSON.stringify({
-          discovered: candidates.length,
-          processed,
-          added,
-          analyzed: pending.length,
-        }),
-        jobId,
-      );
+      await executeTask(db, this.jobId!, {
+        fetcher: this.fetcher,
+        ingest: (article, url) => ingest(db, article, url, true),
+        analyze: (id, prompt) => analyzeNews(db, id, this.analyzer, prompt),
+        pause: () => (this.fetcher === fetchHtml ? sleep(800) : Promise.resolve()),
+      });
     } catch (e) {
-      run(
-        db,
-        "UPDATE jobs SET status='failed',finished_at=?,error=? WHERE id=?",
-        now(),
-        e instanceof Error ? e.message : '任务失败',
-        jobId,
-      );
+      if (this.jobId)
+        run(
+          db,
+          "UPDATE jobs SET status='interrupted',error=? WHERE id=?",
+          e instanceof Error ? e.message : '任务中断',
+          this.jobId,
+        );
     } finally {
       clearInterval(heartbeat);
     }

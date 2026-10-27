@@ -95,3 +95,45 @@ export function extractArticle(html: string) {
   if (!title || body.length < 30) throw new Error('无法提取新闻标题或正文，需检查来源页面结构');
   return { title, body, publishedAt };
 }
+
+export function extractListing(html: string, base: string) {
+  const $ = cheerio.load(html);
+  const rows = $('li.catlist_li');
+  const entries: { url: string; publishedAt: string | null; precise: boolean }[] = [];
+  const read = (a: any, rowText: string) => {
+    try {
+      const url = canonicalUrl($(a).attr('href')!, base);
+      if (!/\/\d{4}\/\d{2}\/\d+\.html|show\.php\?itemid=\d+/.test(url)) return;
+      const match = rowText.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?/);
+      entries.push({
+        url,
+        publishedAt: match
+          ? new Date(`${match[1]}T${match[2] || '00:00'}:00+08:00`).toISOString()
+          : null,
+        precise: !!match?.[2],
+      });
+    } catch {}
+  };
+  if (rows.length)
+    rows.each((_, row) => {
+      $(row)
+        .find('a[href]')
+        .each((_, a) => read(a, $(row).find('span').first().text()));
+    });
+  else $('a[href]').each((_, a) => read(a, $(a).closest('li').find('span').first().text()));
+  let next: string | undefined;
+  $('a[href]').each((_, a) => {
+    if (!next && /^下一页\s*[»›>]*$/i.test($(a).text().trim()))
+      try {
+        next = canonicalUrl($(a).attr('href')!, base);
+      } catch {}
+  });
+  const seeds: string[] = [];
+  const u = new URL(base);
+  if (u.hostname === 'news.foodmate.net' && u.pathname === '/')
+    for (const path of ['guonei', 'guoji', 'yujing'])
+      if ($(`a[href*="/${path}/"]`).length) seeds.push(`https://news.foodmate.net/${path}/`);
+  if (u.hostname === 'fsc.foodmate.net' && u.pathname === '/' && $('a[href*="list.php"]').length)
+    seeds.push('https://fsc.foodmate.net/list.php');
+  return { entries, next, seeds, ordered: rows.length > 0 };
+}

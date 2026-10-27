@@ -22,6 +22,12 @@ export function openDatabase(path = process.env.DATABASE_PATH || './data/food-sa
     CREATE TABLE IF NOT EXISTS notifications(user_id INTEGER PRIMARY KEY REFERENCES users(id),cursor INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY,owner TEXT NOT NULL,expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS reanalysis_queue(job_id INTEGER NOT NULL REFERENCES jobs(id),news_id INTEGER NOT NULL REFERENCES news(id),status TEXT NOT NULL DEFAULT 'pending',error TEXT,PRIMARY KEY(job_id,news_id));
+    CREATE TABLE IF NOT EXISTS task_pages(job_id INTEGER NOT NULL REFERENCES jobs(id),url TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',error TEXT,PRIMARY KEY(job_id,url));
+    CREATE TABLE IF NOT EXISTS task_items(id INTEGER PRIMARY KEY,job_id INTEGER NOT NULL REFERENCES jobs(id),url TEXT NOT NULL,news_id INTEGER REFERENCES news(id),published_at TEXT,result TEXT NOT NULL DEFAULT 'pending',model_status TEXT NOT NULL DEFAULT 'none',analysis_id INTEGER REFERENCES analyses(id),error TEXT,UNIQUE(job_id,url));
+    CREATE INDEX IF NOT EXISTS task_items_url ON task_items(url,id);
+    CREATE INDEX IF NOT EXISTS task_items_progress ON task_items(job_id,result,model_status);
+    CREATE INDEX IF NOT EXISTS task_pages_progress ON task_pages(job_id,status);
+    CREATE INDEX IF NOT EXISTS alerts_analysis ON alerts(analysis_id);
     INSERT OR IGNORE INTO migrations VALUES(1,datetime('now'));`);
   return db;
 }
