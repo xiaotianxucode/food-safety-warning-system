@@ -9,3 +9,5 @@ CREDENTIALS.local.txt
 *.docx
 test-results
 playwright-report
+.tools
+.share

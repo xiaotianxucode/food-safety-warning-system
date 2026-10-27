@@ -108,6 +108,16 @@ npm.cmd run test:e2e
 
 ## 服务器部署
 
+### 临时分享给朋友
+
+本机网站启动后，双击 `start-share.cmd` 建立 Cloudflare 临时隧道。脚本首次从 Cloudflare 官方 GitHub 发布下载固定版本并校验 SHA256，将隧道程序保存在 `.tools/`，日志、进程信息和当前网址保存在 `.share/`；这些目录不提交 Git，也不进入 Docker 构建。
+
+把输出的 `https://…trycloudflare.com` 链接发给朋友，并提供后台创建的普通用户账号。公网访问仍需网站账号登录；本机 HTTP 登录保持可用，可信本机 HTTPS 代理访问会使用 Secure 会话 Cookie。电脑、网站和隧道进程需要保持运行。双击 `stop-share.cmd` 可停止公网分享，本机网站继续运行；下次重新开启隧道可能得到不同网址。
+
+临时隧道用于体验，不保证固定网址或持续在线。长期使用请按下面的服务器部署方式运行。
+
+### Docker 与 HTTPS
+
 安装 Docker，按 `.env.example` 建立服务器 `.env` 并配置密钥：
 
 ```sh

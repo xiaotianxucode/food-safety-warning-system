@@ -332,6 +332,22 @@ describe('新闻与模型处理', () => {
   });
 });
 describe('登录、权限和提醒', () => {
+  it('本机HTTP仍可登录，可信HTTPS代理的会话Cookie使用Secure', async () => {
+    addUser();
+    const app = createApp(db);
+    const local = await request(app)
+      .post('/api/login')
+      .send({ username: 'reader', password: 'test-password-2026' })
+      .expect(200);
+    expect(local.headers['set-cookie'][0]).not.toMatch(/; Secure/i);
+    const proxied = await request(app)
+      .post('/api/login')
+      .set('X-Forwarded-Proto', 'https')
+      .send({ username: 'reader', password: 'test-password-2026' })
+      .expect(200);
+    expect(proxied.headers['set-cookie'][0]).toMatch(/; Secure/i);
+    expect(proxied.headers['set-cookie'][0]).toMatch(/HttpOnly/);
+  });
   it('任务详情默认排除窗口外日志，提供各范围数量和独立分页', async () => {
     addUser('developer', 'developer');
     const id = addNews();

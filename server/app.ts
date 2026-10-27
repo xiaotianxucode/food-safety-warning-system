@@ -19,6 +19,7 @@ declare global {
 export function createApp(db: DB, worker = new Worker(db)) {
   initialize(db);
   const app = express();
+  app.set('trust proxy', 'loopback');
   app.disable('x-powered-by');
   app.use(
     helmet({
@@ -76,7 +77,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
     res.cookie('session', token, {
       httpOnly: true,
       sameSite: 'strict',
-      secure: process.env.COOKIE_SECURE === 'true',
+      secure: process.env.COOKIE_SECURE === 'true' || req.secure,
       maxAge: 7 * 86400_000,
       path: '/',
     });
