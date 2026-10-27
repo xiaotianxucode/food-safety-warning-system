@@ -329,11 +329,12 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
 function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
   const [data, setData] = useState<any>();
   const [page, setPage] = useState(1);
+  const [scope, setScope] = useState('window');
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
     const load = () =>
-      get(`/admin/jobs/${id}?page=${page}`)
+      get(`/admin/jobs/${id}?page=${page}&scope=${scope}`)
         .then((d) => {
           if (active) {
             setData(d);
@@ -349,7 +350,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
       active = false;
       clearInterval(timer);
     };
-  }, [id, page]);
+  }, [id, page, scope]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -381,6 +382,29 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                 {full(data.job.started_at)}
               </p>
               <TaskSummary job={data.job} />
+              <div className="task-filters">
+                <label>
+                  记录范围
+                  <select
+                    aria-label="详情记录范围"
+                    value={scope}
+                    onChange={(e) => {
+                      setScope(e.target.value);
+                      setPage(1);
+                    }}
+                  >
+                    <option value="window">本次范围（{data.totals.window}）</option>
+                    <option value="outside">窗口外日志（{data.totals.outside}）</option>
+                    <option value="all">全部扫描记录（{data.totals.all}）</option>
+                  </select>
+                </label>
+              </div>
+              <p className="muted">
+                以下为明细展示分页，不代表待处理数量。
+                {scope === 'outside'
+                  ? '窗口外链接不会投入本次模型分析。'
+                  : '本次范围包含采集、分析失败及时间待确认记录；实际剩余量见上方“待处理／处理中”。'}
+              </p>
               {data.job.error && <pre className="inline-error">{data.job.error}</pre>}
               {data.pageErrors.map((p: any) => (
                 <p key={p.url} className="error">
@@ -423,7 +447,13 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                   </tbody>
                 </table>
               </div>
-              {!data.total && <p className="muted">此任务没有逐项记录；旧版任务仅保留原始汇总。</p>}
+              {!data.total && (
+                <p className="muted">
+                  {data.totals.all
+                    ? '当前筛选条件下没有记录。'
+                    : '此任务没有逐项记录；旧版任务仅保留原始汇总。'}
+                </p>
+              )}
               <div className="pagination">
                 <button
                   className="button"
@@ -433,7 +463,8 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                   上一页
                 </button>
                 <span>
-                  {page} / {Math.max(1, Math.ceil(data.total / 50))}
+                  第 {page} / {Math.max(1, Math.ceil(data.total / 50))} 页 · 共 {data.total} 条 ·
+                  每页 50 条
                 </span>
                 <button
                   className="button"

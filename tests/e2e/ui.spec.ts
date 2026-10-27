@@ -119,6 +119,10 @@ test('任务中心详情和采集配置、提示词独立保存', async ({ page 
   await expect(page.getByRole('button', { name: '立即采集', exact: true })).toHaveCount(1);
   await page.getByRole('button', { name: '任务详情', exact: true }).first().click();
   await expect(page.getByRole('dialog', { name: /任务详情/ })).toContainText('重置已处理');
+  await expect(page.getByRole('combobox', { name: '详情记录范围' })).toHaveValue('window');
+  await expect(page.getByRole('dialog', { name: /任务详情/ })).toContainText(
+    '明细展示分页，不代表待处理数量',
+  );
   await page.getByRole('button', { name: '关闭任务详情' }).click();
   await page.getByRole('button', { name: '采集与模型', exact: true }).click();
   await expect(page.getByText('回溯范围（天）', { exact: true })).toHaveCount(0);

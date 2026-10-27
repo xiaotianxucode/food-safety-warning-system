@@ -332,6 +332,42 @@ describe('新闻与模型处理', () => {
   });
 });
 describe('登录、权限和提醒', () => {
+  it('任务详情默认排除窗口外日志，提供各范围数量和独立分页', async () => {
+    addUser('developer', 'developer');
+    const id = addNews();
+    const job = Number(
+      run(
+        db,
+        "INSERT INTO jobs(kind,status,started_at,summary) VALUES('manual','completed',?,?)",
+        now(),
+        JSON.stringify({ version: 2 }),
+      ).lastInsertRowid,
+    );
+    run(
+      db,
+      "INSERT INTO task_items(job_id,url,news_id,result) VALUES(?,?,?,'new')",
+      job,
+      'https://news.foodmate.net/2026/10/12345.html',
+      id,
+    );
+    run(
+      db,
+      "INSERT INTO task_items(job_id,url,result) VALUES(?,?,'outside')",
+      job,
+      'https://news.foodmate.net/2026/06/99999.html',
+    );
+    const agent = request.agent(createApp(db));
+    await agent.post('/api/login').send({ username: 'developer', password: 'test-password-2026' });
+    const scoped = (await agent.get(`/api/admin/jobs/${job}`)).body;
+    expect(scoped.total).toBe(1);
+    expect(scoped.items[0].result).toBe('new');
+    expect(scoped.totals).toEqual({ all: 2, outside: 1, window: 1 });
+    const outside = (await agent.get(`/api/admin/jobs/${job}?scope=outside`)).body;
+    expect(outside.total).toBe(1);
+    expect(outside.items[0].result).toBe('outside');
+    expect((await agent.get(`/api/admin/jobs/${job}?scope=all`)).body.total).toBe(2);
+    await agent.get(`/api/admin/jobs/${job}?scope=invalid`).expect(400);
+  });
   it('配置分开保存、删除旧限制、模型失败批量重试及任务接口鉴权', async () => {
     addUser();
     addUser('developer', 'developer');

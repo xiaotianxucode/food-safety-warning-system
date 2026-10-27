@@ -293,26 +293,50 @@ export function createApp(db: DB, worker = new Worker(db)) {
     if (!job) return res.status(404).json({ error: '任务不存在' });
     const page = z.coerce.number().int().min(1).default(1).parse(req.query.page);
     const reset = job.kind === 'analysis_reset';
+    const scope = z.enum(['window', 'outside', 'all']).default('window').parse(req.query.scope);
+    const filter = reset
+      ? scope === 'outside'
+        ? ' AND 1=0'
+        : ''
+      : scope === 'window'
+      ? " AND i.result<>'outside'"
+      : scope === 'outside'
+      ? " AND i.result='outside'"
+      : '';
+    const totals = reset
+      ? {
+          all: one(db, 'SELECT COUNT(*) AS count FROM reanalysis_queue WHERE job_id=?', job.id)!
+            .count,
+          outside: 0,
+        }
+      : one(
+          db,
+          "SELECT COUNT(*) AS 'all',COALESCE(SUM(result='outside'),0) AS outside FROM task_items WHERE job_id=?",
+          job.id,
+        )!;
     res.json({
       job,
       items: reset
         ? all(
             db,
-            'SELECT q.news_id,n.title,q.status AS result,q.error,q.status AS model_status,NULL AS url FROM reanalysis_queue q JOIN news n ON n.id=q.news_id WHERE job_id=? ORDER BY q.news_id LIMIT 50 OFFSET ?',
+            `SELECT q.news_id,n.title,q.status AS result,q.error,q.status AS model_status,NULL AS url FROM reanalysis_queue q JOIN news n ON n.id=q.news_id WHERE job_id=? ${filter} ORDER BY q.news_id LIMIT 50 OFFSET ?`,
             job.id,
             (page - 1) * 50,
           )
         : all(
             db,
-            'SELECT i.*,n.title FROM task_items i LEFT JOIN news n ON n.id=i.news_id WHERE job_id=? ORDER BY i.id LIMIT 50 OFFSET ?',
+            `SELECT i.*,n.title FROM task_items i LEFT JOIN news n ON n.id=i.news_id WHERE job_id=? ${filter} ORDER BY i.id LIMIT 50 OFFSET ?`,
             job.id,
             (page - 1) * 50,
           ),
-      total: one(
-        db,
-        `SELECT COUNT(*) AS count FROM ${reset ? 'reanalysis_queue' : 'task_items'} WHERE job_id=?`,
-        job.id,
-      )!.count,
+      total:
+        scope === 'all'
+          ? totals.all
+          : scope === 'outside'
+          ? totals.outside
+          : totals.all - totals.outside,
+      totals: { ...totals, window: totals.all - totals.outside },
+      scope,
       page,
       pageErrors: all(
         db,
