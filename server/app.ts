@@ -197,7 +197,10 @@ export function createApp(db: DB, worker = new Worker(db)) {
       parseId(req.params.id),
     );
     if (!a) return res.status(404).json({ error: '预警不存在或已撤下' });
-    res.json(serialize(a));
+    res.json({
+      ...serialize(a),
+      sources: all(db, 'SELECT url,title FROM sources WHERE news_id=? ORDER BY id', a.news_id),
+    });
   });
   app.post('/api/alerts/:id/read', (req, res) => {
     const id = parseId(req.params.id);

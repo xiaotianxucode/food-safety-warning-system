@@ -289,10 +289,13 @@ function AlertDetail({ alert }: { alert: Alert }) {
       <p className="footnote">本分析对应新闻中的具体对象及范围，由模型辅助生成。</p>
       {alert.sources && (
         <div className="source-list">
-          <h4>新闻来源（开发者核查）</h4>
+          <h4>原文链接</h4>
           {alert.sources.map((s) => (
             <a href={s.url} target="_blank" rel="noreferrer" key={s.url}>
-              {s.title}
+              <span>
+                {s.title}
+                <small className="source-url">{s.url}</small>
+              </span>
               <ArrowUpRight size={15} />
             </a>
           ))}

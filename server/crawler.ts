@@ -15,10 +15,6 @@ export function canonicalUrl(raw: string, base?: string) {
 }
 export const fingerprint = (body: string) =>
   createHash('sha256').update(body.replace(/\s+/g, '')).digest('hex');
-export const relevant = (text: string) =>
-  /食品|食药|食用|农药|抽检|召回|不合格|污染|调味|香辛料|酱油|草莓|投诉|监管|天气|原料|供应链/.test(
-    text,
-  );
 export async function fetchHtml(url: string) {
   let current = canonicalUrl(url);
   for (let redirects = 0; redirects < 4; redirects++) {

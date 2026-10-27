@@ -1106,6 +1106,17 @@ blockquote span {
   padding-top: 15px;
   margin-top: 15px;
 }
+.source-list a > span {
+  min-width: 0;
+  flex: 1;
+}
+.source-url {
+  display: block;
+  font-size: 10px;
+  color: #91a08e;
+  overflow-wrap: anywhere;
+  margin-top: 3px;
+}
 .source-list a {
   display: flex;
   gap: 8px;

@@ -43,6 +43,13 @@ test('登录、查看分析、已读持久化、后台来源与移动端布局',
     .filter({ has: page.getByRole('heading', { name: '日本 · 草莓' }) })
     .click();
   await expect(page.getByRole('dialog')).toContainText('涉事批次退运');
+  await expect(
+    page.getByRole('dialog').getByRole('heading', { name: '原文链接', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole('dialog').getByRole('link')).toHaveAttribute(
+    'href',
+    'https://news.foodmate.net/2026/10/999999.html',
+  );
   await page.getByRole('button', { name: '关闭', exact: true }).click();
   await page.reload();
   await expect(page.getByRole('status')).toHaveCount(0);

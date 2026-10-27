@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { all, one, run, transaction, now, type DB } from './db.js';
-import { DEFAULT_PROMPT } from './prompt.js';
-import { callModel, modelName } from './model.js';
+import { DEFAULT_PROMPT, LEGACY_PROMPT_HASH } from './prompt.js';
+import { callModel, modelName, validateAnalysis } from './model.js';
 import {
   canonicalUrl,
   DEFAULT_SOURCES,
@@ -9,12 +9,19 @@ import {
   extractLinks,
   fetchHtml,
   fingerprint,
-  relevant,
 } from './crawler.js';
 import * as cheerio from 'cheerio';
 export function initialize(db: DB) {
   if (!one(db, 'SELECT id FROM prompts LIMIT 1'))
     run(db, 'INSERT INTO prompts(content,created_at) VALUES(?,?)', DEFAULT_PROMPT, now());
+  if (!one(db, 'SELECT version FROM migrations WHERE version=2'))
+    transaction(db, () => {
+      const active = one(db, 'SELECT content FROM prompts ORDER BY id DESC LIMIT 1');
+      if (active && fingerprint(active.content) === LEGACY_PROMPT_HASH)
+        run(db, 'INSERT INTO prompts(content,created_at) VALUES(?,?)', DEFAULT_PROMPT, now());
+      run(db, "UPDATE news SET status='pending',error=NULL WHERE status='filtered'");
+      run(db, 'INSERT INTO migrations(version,applied_at) VALUES(2,?)', now());
+    });
   if (!one(db, "SELECT key FROM settings WHERE key='crawler'"))
     run(
       db,
@@ -71,7 +78,7 @@ export function ingest(
         article.body,
         article.publishedAt,
         hash,
-        relevant(article.title + ' ' + article.body) ? 'pending' : 'filtered',
+        'pending',
         source.news_id,
       );
       return { id: source.news_id, inserted: true };
@@ -84,7 +91,7 @@ export function ingest(
         article.body,
         article.publishedAt,
         hash,
-        relevant(article.title + ' ' + article.body) ? 'pending' : 'filtered',
+        'pending',
         now(),
       ).lastInsertRowid,
     );
@@ -95,7 +102,7 @@ export function ingest(
 export async function analyzeNews(db: DB, id: number, analyzer = callModel) {
   const news = one(db, 'SELECT * FROM news WHERE id=?', id);
   if (!news || !news.body) throw new Error('新闻正文缺失，不能分析');
-  if (['published', 'no_warning', 'filtered', 'duplicate'].includes(news.status)) return;
+  if (['published', 'no_warning', 'duplicate'].includes(news.status)) return;
   const prompt = one(db, 'SELECT * FROM prompts ORDER BY id DESC LIMIT 1')!;
   const analysisId = Number(
     run(
@@ -112,7 +119,7 @@ export async function analyzeNews(db: DB, id: number, analyzer = callModel) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     run(db, 'UPDATE analyses SET attempts=? WHERE id=?', attempt, analysisId);
     try {
-      const result = await analyzer(prompt.content, news.body);
+      const result = validateAnalysis(await analyzer(prompt.content, news.body), news.body);
       transaction(db, () => {
         run(
           db,

@@ -62,6 +62,37 @@ function addUser(username = 'reader', role = 'user') {
   );
 }
 describe('新闻与模型处理', () => {
+  it('不按关键词预先筛除新闻，模型判定无需预警时不发布', async () => {
+    const text = '本周举办年度交流会，介绍新品与行业动态，正文未披露具体异常事件。';
+    const { id } = ingest(
+      db,
+      { title: '年度交流活动', body: text, publishedAt: now() },
+      'https://news.foodmate.net/2026/10/54321.html',
+    );
+    expect(one(db, 'SELECT status FROM news WHERE id=?', id)?.status).toBe('pending');
+    const model = vi.fn(async () => ({
+      shouldWarn: false,
+      summary: '交流活动及新品介绍，没有具体风险事实，无需预警。',
+      alerts: [],
+    }));
+    await analyzeNews(db, id, model);
+    expect(model).toHaveBeenCalledTimes(1);
+    expect(all(db, 'SELECT * FROM alerts')).toHaveLength(0);
+    expect(one(db, 'SELECT status FROM news WHERE id=?', id)?.status).toBe('no_warning');
+  });
+  it('升级时恢复旧关键词筛除的新闻，并保留开发者自定义提示词', () => {
+    run(db, 'DELETE FROM migrations WHERE version=2');
+    run(db, 'INSERT INTO prompts(content,created_at) VALUES(?,?)', '开发者自定义分析要求', now());
+    const id = addNews();
+    run(db, "UPDATE news SET status='filtered' WHERE id=?", id);
+    initialize(db);
+    initialize(db);
+    expect(one(db, 'SELECT status FROM news WHERE id=?', id)?.status).toBe('pending');
+    expect(one(db, 'SELECT content FROM prompts ORDER BY id DESC LIMIT 1')?.content).toBe(
+      '开发者自定义分析要求',
+    );
+    expect(all(db, 'SELECT version FROM migrations WHERE version=2')).toHaveLength(1);
+  });
   it('提取新闻正文、表格、时间和链接，不采集站外链接', () => {
     const html =
       '<h1>抽检通报</h1><div>时间：2026-10-27 10:30</div><div id="article"><p>日本草莓抽检不合格，涉事批次退运销毁处理。</p><table><tr><td>白胡椒粒</td><td>残留农药</td></tr></table></div><a href="/2026/10/12345.html">详情</a><a href="https://evil.example/2026/10/12345.html">站外</a>';
@@ -254,6 +285,12 @@ describe('登录、权限和提醒', () => {
     await request(app).get('/api/alerts').expect(401);
     const feed = await user.get('/api/alerts').expect(200);
     expect(feed.body.lastJob.error).toBeUndefined();
+    const id = addNews();
+    await analyzeNews(db, id, async () => validateAnalysis(output, body));
+    const detail = await user.get('/api/alerts/1').expect(200);
+    expect(detail.body.sources).toEqual([
+      { url: 'https://news.foodmate.net/2026/10/12345.html', title: '边境不合格名单（测试样例）' },
+    ]);
   });
   it('离线消息持久保存，多标签页同时争取只提醒一次，阅读独立', async () => {
     const uid = addUser();
