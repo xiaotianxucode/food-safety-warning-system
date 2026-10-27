@@ -141,6 +141,10 @@ export function createApp(db: DB, worker = new Worker(db)) {
     const job = one(db, 'SELECT status,started_at,finished_at FROM jobs ORDER BY id DESC LIMIT 1');
     res.json({
       items,
+      counts: one(
+        db,
+        "SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN json_extract(payload,'$.seasoning')=1 THEN 1 ELSE 0 END),0) AS seasoning FROM alerts WHERE withdrawn=0",
+      ),
       readIds: all(db, 'SELECT alert_id FROM reads WHERE user_id=?', req.user!.id).map(
         (r) => r.alert_id,
       ),
@@ -369,12 +373,10 @@ export function createApp(db: DB, worker = new Worker(db)) {
   app.use(
     (error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       if (error instanceof z.ZodError)
-        return res
-          .status(400)
-          .json({
-            error: '输入不符合要求',
-            details: error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
-          });
+        return res.status(400).json({
+          error: '输入不符合要求',
+          details: error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+        });
       if (error instanceof SyntaxError) return res.status(400).json({ error: '请求格式错误' });
       console.error('Request failed:', error?.code || error?.name);
       res.status(500).json({ error: '服务处理失败，请检查服务端日志' });

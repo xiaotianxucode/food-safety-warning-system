@@ -34,6 +34,8 @@ test('登录、查看分析、已读持久化、后台来源与移动端布局',
   await page.getByPlaceholder('请输入密码').fill('e2e-password-only');
   await page.getByRole('button', { name: '登录系统' }).click();
   await expect(page.getByRole('heading', { name: '食品安全预警' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /全部预警/ }).locator('b')).toHaveText('1');
+  await expect(page.getByRole('button', { name: /调味品相关/ }).locator('b')).toHaveText('0');
   await expect(page.getByRole('status')).toContainText('1 条新增预警');
   await page.screenshot({ path: 'test-results/desktop.png', fullPage: true });
   await page

@@ -190,7 +190,7 @@ describe('登录、权限和提醒', () => {
         id,
         analysis,
         String(i),
-        JSON.stringify({ ...output.alerts[0], summary: '测试样例' }),
+        JSON.stringify({ ...output.alerts[0], summary: '测试样例', seasoning: i % 2 === 0 }),
         now(),
       );
     const agent = request.agent(createApp(db));
@@ -200,12 +200,14 @@ describe('登录、权限和提醒', () => {
     expect(first.items[0].id).toBe(2);
     expect(first.cursor).toBe(101);
     expect(first.hasMore).toBe(true);
+    expect(first.counts).toEqual({ total: 205, seasoning: 103 });
     const second = (await agent.get('/api/alerts?after=101')).body;
     expect(second.cursor).toBe(201);
     expect(second.hasMore).toBe(true);
     const last = (await agent.get('/api/alerts?after=201')).body;
     expect(last.items).toHaveLength(4);
     expect(last.hasMore).toBe(false);
+    expect(last.counts).toEqual({ total: 205, seasoning: 103 });
   });
   it('角色越权被阻止，采集错误不泄漏给普通用户', async () => {
     addUser();
@@ -267,6 +269,7 @@ describe('登录、权限和提醒', () => {
     await admin.post('/api/login').send({ username: 'developer', password: 'test-password-2026' });
     await admin.post('/api/admin/alerts/1/withdraw').expect(200);
     expect((await admin.get('/api/alerts')).body.items).toHaveLength(1);
+    expect((await admin.get('/api/alerts')).body.counts).toEqual({ total: 1, seasoning: 1 });
     await admin.get('/api/alerts/1').expect(404);
     await admin.post('/api/logout').set('Origin', 'https://external.example').expect(403);
   });

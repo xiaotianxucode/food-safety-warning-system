@@ -538,7 +538,14 @@ function Dashboard({ notify }: { notify: (text: string) => void }) {
             ].map(([v, l]) => (
               <button key={v} className={filter === v ? 'active' : ''} onClick={() => setFilter(v)}>
                 {l}
-                {v === 'unread' && data.unread > 0 && <b>{data.unread}</b>}
+                <b>
+                  {v === 'all'
+                    ? data.counts?.total ?? data.items.length
+                    : v === 'seasoning'
+                    ? data.counts?.seasoning ??
+                      data.items.filter((a: Alert) => a.payload.seasoning).length
+                    : data.unread}
+                </b>
               </button>
             ))}
           </div>
