@@ -158,6 +158,9 @@ export function createApp(db: DB, worker = new Worker(db)) {
     const job = one(db, 'SELECT status,started_at,finished_at FROM jobs ORDER BY id DESC LIMIT 1');
     res.json({
       items,
+      generation: JSON.parse(
+        one(db, "SELECT value FROM settings WHERE key='feedGeneration'")?.value || '0',
+      ),
       counts: one(
         db,
         `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN json_extract(a.payload,'$.seasoning')=1 THEN 1 ELSE 0 END),0) AS seasoning FROM alerts a WHERE a.withdrawn=0 ${rangeSql}`,
@@ -244,6 +247,8 @@ export function createApp(db: DB, worker = new Worker(db)) {
       users: one(db, 'SELECT COUNT(*) AS count FROM users WHERE active=1')!.count,
       busy: worker.busy,
       jobs: all(db, 'SELECT * FROM jobs ORDER BY id DESC LIMIT 30'),
+      latestReset:
+        one(db, "SELECT * FROM jobs WHERE kind='analysis_reset' ORDER BY id DESC LIMIT 1") || null,
     }),
   );
   app.get('/api/admin/news', (req, res) => {
@@ -262,6 +267,30 @@ export function createApp(db: DB, worker = new Worker(db)) {
       })),
       total: one(db, 'SELECT COUNT(*) AS count FROM news WHERE title LIKE ?', `%${search}%`)!.count,
     });
+  });
+  const parseSince = (value: unknown) => {
+    const result = z.iso.datetime({ offset: true }).optional().parse(value);
+    return result ? new Date(result).toISOString() : undefined;
+  };
+  app.get('/api/admin/analysis-reset/preview', (req, res) =>
+    res.json(worker.resetPreview(parseSince(req.query.since))),
+  );
+  app.post('/api/admin/analysis-reset', (req, res) => {
+    const input = z
+      .object({ confirmed: z.literal(true), since: z.iso.datetime({ offset: true }).optional() })
+      .parse(req.body);
+    const since = parseSince(input.since);
+    const preview = worker.resetPreview(since);
+    if (!preview.modelConfigured)
+      return res.status(400).json({ error: '请先配置模型 API 密钥，未清除任何预警' });
+    if (!preview.eligible)
+      return res.status(400).json({ error: '所选范围内没有正文完整的可分析文章，未清除任何预警' });
+    const result = worker.resetAnalysis(since);
+    if (!result)
+      return res
+        .status(409)
+        .json({ error: '已有采集、分析或待恢复的重置任务，请等待完成后再操作' });
+    res.status(202).json(result);
   });
   app.post('/api/admin/collect', (_req, res) =>
     res

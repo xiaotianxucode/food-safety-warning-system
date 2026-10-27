@@ -62,6 +62,135 @@ function addUser(username = 'reader', role = 'user') {
   );
 }
 describe('新闻与模型处理', () => {
+  it('重置清除所有旧预警，仅分析发布时间达标的文章，固定提示词且不受单次采集上限限制', async () => {
+    const uid = addUser();
+    const ids: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const n = ingest(
+        db,
+        {
+          title: `新闻${i}`,
+          body: body + `附注${i}`,
+          publishedAt: [
+            '2026-10-26T15:59:59.999Z',
+            '2026-10-26T16:00:00.000Z',
+            null,
+            '2026-10-27T16:00:00.000Z',
+          ][i],
+        },
+        `https://news.foodmate.net/2026/10/${60000 + i}.html`,
+      );
+      ids.push(n.id);
+      await analyzeNews(db, n.id, async () => validateAnalysis(output, body));
+    }
+    const oldMax = one(db, 'SELECT MAX(id) AS id FROM alerts')!.id;
+    run(db, 'INSERT INTO reads VALUES(?,?,?)', uid, 1, now());
+    run(db, 'INSERT INTO notifications VALUES(?,?)', uid, oldMax);
+    const cfg = JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawler'")!.value);
+    run(
+      db,
+      "UPDATE settings SET value=? WHERE key='crawler'",
+      JSON.stringify({ ...cfg, maxArticles: 1 }),
+    );
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const model = vi.fn(async () => {
+      await gate;
+      return validateAnalysis(output, body);
+    });
+    const worker = new Worker(db, async () => '<html/>', model);
+    expect(worker.resetPreview('2026-10-26T16:00:00.000Z').eligible).toBe(2);
+    const reset = worker.resetAnalysis('2026-10-26T16:00:00.000Z')!;
+    expect(reset.deletedAlerts).toBe(8);
+    expect(all(db, 'SELECT * FROM alerts')).toHaveLength(0);
+    expect(all(db, 'SELECT * FROM reads')).toHaveLength(0);
+    expect(one(db, 'SELECT status FROM news WHERE id=?', ids[0])?.status).toBe('reset_excluded');
+    expect(one(db, 'SELECT status FROM news WHERE id=?', ids[2])?.status).toBe('reset_excluded');
+    expect(new Worker(db, undefined, model).resetAnalysis()).toBeUndefined();
+    run(db, 'INSERT INTO prompts(content,created_at) VALUES(?,?)', '执行中新增的提示词版本', now());
+    finish();
+    await worker.stop();
+    expect(model).toHaveBeenCalledTimes(2);
+    expect(one(db, 'SELECT MIN(id) AS id FROM alerts')!.id).toBeGreaterThan(oldMax);
+    expect(all(db, 'SELECT * FROM alerts')).toHaveLength(4);
+    expect(
+      all(db, 'SELECT prompt_id FROM analyses ORDER BY id DESC LIMIT 2').every(
+        (a) => a.prompt_id === 1,
+      ),
+    ).toBe(true);
+    expect(one(db, 'SELECT status FROM jobs WHERE id=?', reset.jobId)?.status).toBe('completed');
+    expect(
+      JSON.parse(one(db, 'SELECT summary FROM jobs WHERE id=?', reset.jobId)!.summary),
+    ).toMatchObject({ total: 2, completed: 2, failed: 0, processed: 2 });
+    expect(all(db, 'SELECT * FROM sources')).toHaveLength(4);
+    expect(one(db, "SELECT value FROM settings WHERE key='feedGeneration'")?.value).toBe('1');
+  });
+  it('空范围不清除预警，有任务锁时不允许重置', async () => {
+    const id = addNews();
+    await analyzeNews(db, id, async () => validateAnalysis(output, body));
+    const worker = new Worker(db, undefined, async () => validateAnalysis(output, body));
+    expect(() => worker.resetAnalysis('2099-01-01T00:00:00.000Z')).toThrow('没有正文完整');
+    expect(all(db, 'SELECT * FROM alerts')).toHaveLength(2);
+    expect(all(db, 'SELECT * FROM locks')).toHaveLength(0);
+    run(
+      db,
+      "INSERT INTO locks VALUES('worker','other',?)",
+      new Date(Date.now() + 60000).toISOString(),
+    );
+    expect(worker.resetAnalysis()).toBeUndefined();
+    expect(all(db, 'SELECT * FROM alerts')).toHaveLength(2);
+  });
+  it('重启继续重置队列，保留已重新生成的预警且不再次清空', async () => {
+    const id = addNews();
+    await analyzeNews(db, id, async () => validateAnalysis(output, body));
+    const second = ingest(
+      db,
+      { title: '第二篇', body: body + '第二篇附注', publishedAt: now() },
+      'https://news.foodmate.net/2026/10/77777.html',
+    ).id;
+    run(db, "UPDATE news SET status='analyzing' WHERE id=?", second);
+    run(
+      db,
+      "INSERT INTO analyses(news_id,status,model,prompt_id,created_at) VALUES(?,'running','test',1,?)",
+      second,
+      now(),
+    );
+    const job = Number(
+      run(
+        db,
+        "INSERT INTO jobs(kind,status,started_at,summary) VALUES('analysis_reset','running',?,?)",
+        now(),
+        JSON.stringify({
+          total: 2,
+          completed: 1,
+          failed: 0,
+          processed: 1,
+          promptId: 1,
+          deletedAlerts: 2,
+        }),
+      ).lastInsertRowid,
+    );
+    run(db, "INSERT INTO reanalysis_queue VALUES(?,?,'completed',NULL)", job, id);
+    run(db, "INSERT INTO reanalysis_queue VALUES(?,?,'running',NULL)", job, second);
+    run(db, "INSERT INTO settings VALUES('feedGeneration','1')");
+    const model = vi.fn(async () => ({ shouldWarn: false, summary: '未发现具体风险', alerts: [] }));
+    const fetcher = vi.fn(async () => '<html/>');
+    const worker = new Worker(db, fetcher, model);
+    expect(worker.launch()).toBe(true);
+    await worker.stop();
+    expect(model).toHaveBeenCalledTimes(1);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(all(db, 'SELECT id FROM alerts ORDER BY id').map((a) => a.id)).toEqual([1, 2]);
+    expect(one(db, "SELECT value FROM settings WHERE key='feedGeneration'")?.value).toBe('1');
+    expect(one(db, 'SELECT status FROM jobs WHERE id=?', job)?.status).toBe('completed');
+    expect(JSON.parse(one(db, 'SELECT summary FROM jobs WHERE id=?', job)!.summary)).toMatchObject({
+      total: 2,
+      completed: 2,
+      processed: 2,
+    });
+  });
   it('不按关键词预先筛除新闻，模型判定无需预警时不发布', async () => {
     const text = '本周举办年度交流会，介绍新品与行业动态，正文未披露具体异常事件。';
     const { id } = ingest(
@@ -203,6 +332,52 @@ describe('新闻与模型处理', () => {
   });
 });
 describe('登录、权限和提醒', () => {
+  it('重置仅开发者可用，要求确认，校验时间且异步返回进度', async () => {
+    addUser();
+    addUser('developer', 'developer');
+    const id = addNews();
+    await analyzeNews(db, id, async () => validateAnalysis(output, body));
+    const worker = new Worker(db, undefined, async () => ({
+      shouldWarn: false,
+      summary: '重置后模型判定无需预警',
+      alerts: [],
+    }));
+    const app = createApp(db, worker);
+    const user = request.agent(app);
+    const admin = request.agent(app);
+    await user.post('/api/login').send({ username: 'reader', password: 'test-password-2026' });
+    await admin.post('/api/login').send({ username: 'developer', password: 'test-password-2026' });
+    await user.get('/api/admin/analysis-reset/preview').expect(403);
+    await user.post('/api/admin/analysis-reset').send({ confirmed: true }).expect(403);
+    await admin.post('/api/admin/analysis-reset').send({}).expect(400);
+    await admin
+      .post('/api/admin/analysis-reset')
+      .send({ confirmed: true, since: 'bad-date' })
+      .expect(400);
+    await admin
+      .post('/api/admin/analysis-reset')
+      .send({ confirmed: true, since: '2099-01-01T00:00:00.000Z' })
+      .expect(400);
+    expect(all(db, 'SELECT * FROM alerts')).toHaveLength(2);
+    const preview = (await admin.get('/api/admin/analysis-reset/preview')).body;
+    expect(preview).toMatchObject({ alerts: 2, eligible: 1 });
+    const response = await admin
+      .post('/api/admin/analysis-reset')
+      .send({ confirmed: true })
+      .expect(202);
+    expect(response.body).toMatchObject({ deletedAlerts: 2, total: 1 });
+    await worker.stop();
+    const feed = (await user.get('/api/alerts?after=2')).body;
+    expect(feed.generation).toBe(1);
+    expect(feed.items).toHaveLength(0);
+    const overview = (await admin.get('/api/admin/overview')).body;
+    expect(overview.latestReset.status).toBe('completed');
+    expect(JSON.parse(overview.latestReset.summary)).toMatchObject({
+      processed: 1,
+      completed: 1,
+      failed: 0,
+    });
+  });
   it('按北京时间的起止日期筛选，分类数量与分页均限定在范围内', async () => {
     addUser();
     const id = addNews();

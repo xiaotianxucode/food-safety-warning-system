@@ -87,6 +87,8 @@ const statusNames: Record<string, string> = {
   scheduled: '定时采集',
   manual: '手动采集',
   retry: '失败重试',
+  analysis_reset: '模型分析重置',
+  reset_excluded: '未纳入本次重置',
 };
 function Modal({
   title,
@@ -343,6 +345,7 @@ function DashboardFeed({
   );
   const [more, setMore] = useState(true);
   const cursor = useRef(0);
+  const generation = useRef<number | null>(null);
   const inFlight = useRef(false);
   const cards = useRef<HTMLDivElement>(null);
   const paused = useRef(false);
@@ -352,17 +355,32 @@ function DashboardFeed({
     inFlight.current = true;
     try {
       let next = await api(alertUrl(cursor.current ? { after: cursor.current } : {}));
+      if (generation.current !== null && generation.current !== (next.generation ?? 0))
+        next = await api(alertUrl());
       let incoming = next.items;
       while (next.hasMore) {
-        next = await api(alertUrl({ after: next.cursor }));
-        incoming = [...incoming, ...next.items];
+        const page = await api(alertUrl({ after: next.cursor }));
+        if ((page.generation ?? 0) !== (next.generation ?? 0)) {
+          next = await api(alertUrl());
+          incoming = next.items;
+        } else {
+          next = page;
+          incoming = [...incoming, ...next.items];
+        }
+      }
+      const replaced = generation.current !== null && generation.current !== (next.generation ?? 0);
+      generation.current = next.generation ?? 0;
+      if (replaced) {
+        setMore(true);
+        setDetail(null);
+        cards.current?.scrollTo({ left: 0 });
       }
       cursor.current = next.cursor;
       setData((old: any) => ({
         ...next,
         items: [
           ...incoming,
-          ...old.items.filter(
+          ...(replaced ? [] : old.items).filter(
             (a: Alert) =>
               !incoming.some((n: Alert) => n.id === a.id) && !next.withdrawnIds?.includes(a.id),
           ),
@@ -706,6 +724,10 @@ function DashboardFeed({
             onClick={async () => {
               try {
                 const next = await api(alertUrl({ before: data.items.at(-1).id }));
+                if ((next.generation ?? 0) !== generation.current) {
+                  await refresh();
+                  return;
+                }
                 setData((d: any) => ({
                   ...d,
                   items: [
@@ -780,6 +802,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [createUser, setCreateUser] = useState(false);
   const [resetUser, setResetUser] = useState<any>();
+  const [resetOpen, setResetOpen] = useState(false);
   const load = useCallback(async () => {
     try {
       setOverview(await api('/admin/overview'));
@@ -906,7 +929,12 @@ function Admin({ notify }: { notify: (s: string) => void }) {
                         {j.summary &&
                           (() => {
                             const s = JSON.parse(j.summary);
-                            return (
+                            return j.kind === 'analysis_reset' ? (
+                              <p>
+                                已处理 {s.processed} / {s.total} · 成功 {s.completed} · 失败{' '}
+                                {s.failed} · 清除旧预警 {s.deletedAlerts} 条
+                              </p>
+                            ) : (
                               <p>
                                 发现 {s.discovered} · 抓取 {s.processed} · 新增 {s.added} · 分析{' '}
                                 {s.analyzed}
@@ -930,18 +958,29 @@ function Admin({ notify }: { notify: (s: string) => void }) {
             <h2>
               新闻数据库 <span>{news.total} 篇</span>
             </h2>
-            <div className="search">
-              <Search size={16} />
-              <input
-                value={search}
-                placeholder="搜索新闻标题"
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
-              />
+            <div className="news-toolbar">
+              <button
+                className="button danger-outline"
+                disabled={busy || overview?.busy}
+                onClick={() => setResetOpen(true)}
+              >
+                <RefreshCw size={15} />
+                模型分析重置
+              </button>
+              <div className="search">
+                <Search size={16} />
+                <input
+                  value={search}
+                  placeholder="搜索新闻标题"
+                  onChange={(e) => {
+                    setSearch(e.target.value);
+                    setPage(1);
+                  }}
+                />
+              </div>
             </div>
           </div>
+          {overview?.latestReset && <ResetProgress job={overview.latestReset} />}
           <div className="table-scroll">
             <table>
               <thead>
@@ -1274,6 +1313,18 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           )}
         </Modal>
       )}
+      {resetOpen && (
+        <AnalysisResetDialog
+          onClose={() => setResetOpen(false)}
+          onStarted={(result) => {
+            setResetOpen(false);
+            notify(
+              `重置任务 #${result.jobId} 已开始，已清除 ${result.deletedAlerts} 条旧预警，将重新分析 ${result.total} 篇文章。`,
+            );
+            load();
+          }}
+        />
+      )}
       {(createUser || resetUser) && (
         <Modal
           title={resetUser ? `重置密码 · ${resetUser.username}` : '创建账号'}
@@ -1336,6 +1387,160 @@ function Admin({ notify }: { notify: (s: string) => void }) {
         </Modal>
       )}
     </>
+  );
+}
+function ResetProgress({ job }: { job: any }) {
+  const progress = JSON.parse(job.summary || '{}');
+  return (
+    <div className="reset-progress">
+      <div>
+        <strong>模型分析重置 #{job.id}</strong>
+        <Status value={job.status} />
+        <span>
+          已处理 {progress.processed || 0} / {progress.total || 0} 篇 · 成功{' '}
+          {progress.completed || 0} · 失败 {progress.failed || 0}
+        </span>
+      </div>
+      <progress value={progress.processed || 0} max={progress.total || 1} />
+      <small>
+        {progress.since
+          ? '新闻发布时间不早于 ' +
+            new Date(progress.since).toLocaleString('zh-CN', {
+              timeZone: 'Asia/Shanghai',
+              hour12: false,
+            })
+          : '范围：全部正文完整的文章'}{' '}
+        · 提示词 v{progress.promptId} · 清除旧预警 {progress.deletedAlerts || 0} 条
+      </small>
+      {job.error && <p className="inline-error">{job.error}</p>}
+    </div>
+  );
+}
+function AnalysisResetDialog({
+  onClose,
+  onStarted,
+}: {
+  onClose: () => void;
+  onStarted: (result: any) => void;
+}) {
+  const [since, setSince] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const [preview, setPreview] = useState<any>();
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const sinceIso = since ? new Date(`${since}+08:00`).toISOString() : undefined;
+  useEffect(() => {
+    let current = true;
+    setPreview(undefined);
+    setConfirmed(false);
+    setError('');
+    api(
+      '/admin/analysis-reset/preview' + (sinceIso ? '?since=' + encodeURIComponent(sinceIso) : ''),
+    )
+      .then((data) => {
+        if (current) setPreview(data);
+      })
+      .catch((e) => {
+        if (current) setError(e.message);
+      });
+    return () => {
+      current = false;
+    };
+  }, [sinceIso]);
+  return (
+    <Modal
+      title="模型分析重置"
+      onClose={() => {
+        if (!submitting) onClose();
+      }}
+    >
+      <form
+        className="detail reset-form"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!confirmed) return;
+          setSubmitting(true);
+          setError('');
+          try {
+            onStarted(
+              await send('/admin/analysis-reset', {
+                confirmed: true,
+                ...(sinceIso ? { since: sinceIso } : {}),
+              }),
+            );
+          } catch (e) {
+            setError((e as Error).message);
+          } finally {
+            setSubmitting(false);
+          }
+        }}
+      >
+        <div className="error">
+          此操作将删除全部已生成预警（包括所选时间范围外及已撤下的预警），清除对应已读记录。新闻原文和历史分析记录保留。新预警由模型重新判断后发布。
+        </div>
+        <label>
+          新闻发布时间不早于（北京时间，可选）
+          <input
+            type="datetime-local"
+            aria-label="重新分析的新闻发布时间下限"
+            value={since}
+            disabled={submitting}
+            onChange={(e) => setSince(e.target.value)}
+          />
+        </label>
+        <p className="muted">
+          包含所选时刻；留空则分析全部文章。缺少正文、重复记录不参与；设置时间限制时，没有发布时间的文章也不参与。本操作不重新爬取网页。
+        </p>
+        {preview ? (
+          <div className="reset-summary">
+            <span>
+              将删除全部预警 <strong>{preview.alerts}</strong> 条
+            </span>
+            <span>
+              将重新分析 <strong>{preview.eligible}</strong> / {preview.articles} 篇文章
+            </span>
+            <span>
+              使用提示词 v{preview.promptId} · {preview.model}
+            </span>
+          </div>
+        ) : (
+          <p className="muted">正在统计影响范围…</p>
+        )}
+        {preview && !preview.eligible && (
+          <div className="notice">当前范围内没有可分析文章，请调整时间；不会清除预警。</div>
+        )}
+        {preview && !preview.modelConfigured && (
+          <div className="error">请先配置模型 API 密钥。</div>
+        )}
+        <label className="confirm-reset">
+          <input
+            type="checkbox"
+            aria-label="确认删除全部预警并重新分析"
+            checked={confirmed}
+            disabled={submitting}
+            onChange={(e) => setConfirmed(e.target.checked)}
+          />
+          我确认删除全部预警，并按以上范围重新分析
+        </label>
+        {error && (
+          <div className="error" role="alert">
+            {error}
+          </div>
+        )}
+        <div className="form-actions">
+          <button type="button" className="button" disabled={submitting} onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="submit"
+            className="button danger"
+            disabled={submitting || !confirmed || !preview?.eligible || !preview?.modelConfigured}
+          >
+            {submitting ? '正在提交…' : '确认重置并重新分析'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 function Status({ value }: { value: string }) {

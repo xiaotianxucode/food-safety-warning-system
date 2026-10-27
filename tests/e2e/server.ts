@@ -1,6 +1,6 @@
 import { openDatabase, run, now } from '../../server/db.js';
 import { createApp } from '../../server/app.js';
-import { initialize, ingest, analyzeNews } from '../../server/service.js';
+import { initialize, ingest, analyzeNews, Worker } from '../../server/service.js';
 import { hashPassword } from '../../server/auth.js';
 const db = openDatabase(':memory:');
 initialize(db);
@@ -39,4 +39,9 @@ await analyzeNews(db, id, async () => ({
     },
   ],
 }));
-createApp(db).listen(3101, '127.0.0.1');
+const worker = new Worker(
+  db,
+  async () => '<html></html>',
+  async () => ({ shouldWarn: false, summary: '重置验收测试：样例不发布为真实预警。', alerts: [] }),
+);
+createApp(db, worker).listen(3101, '127.0.0.1');

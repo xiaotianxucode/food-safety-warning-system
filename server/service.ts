@@ -34,6 +34,7 @@ export function initialize(db: DB) {
         sources: DEFAULT_SOURCES,
       }),
     );
+  run(db, 'INSERT OR IGNORE INTO migrations(version,applied_at) VALUES(3,?)', now());
 }
 export const config = (db: DB) =>
   JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawler'")!.value);
@@ -99,11 +100,13 @@ export function ingest(
     return { id, inserted: true };
   });
 }
-export async function analyzeNews(db: DB, id: number, analyzer = callModel) {
+export async function analyzeNews(db: DB, id: number, analyzer = callModel, promptId?: number) {
   const news = one(db, 'SELECT * FROM news WHERE id=?', id);
   if (!news || !news.body) throw new Error('新闻正文缺失，不能分析');
   if (['published', 'no_warning', 'duplicate'].includes(news.status)) return;
-  const prompt = one(db, 'SELECT * FROM prompts ORDER BY id DESC LIMIT 1')!;
+  const prompt = promptId
+    ? one(db, 'SELECT * FROM prompts WHERE id=?', promptId)!
+    : one(db, 'SELECT * FROM prompts ORDER BY id DESC LIMIT 1')!;
   const analysisId = Number(
     run(
       db,
@@ -184,13 +187,116 @@ export class Worker {
     if (this.timer) clearInterval(this.timer);
     await this.active;
   }
+  canAnalyze() {
+    return this.analyzer !== callModel || !!process.env.MODEL_API_KEY;
+  }
+  resetPreview(since?: string) {
+    const condition =
+      "trim(body)<>'' AND status<>'duplicate'" + (since ? ' AND published_at>=?' : '');
+    const eligible = one(
+      this.db,
+      `SELECT COUNT(*) AS count FROM news WHERE ${condition}`,
+      ...(since ? [since] : []),
+    )!.count;
+    return {
+      eligible,
+      articles: one(this.db, 'SELECT COUNT(*) AS count FROM news')!.count,
+      alerts: one(this.db, 'SELECT COUNT(*) AS count FROM alerts')!.count,
+      since: since || null,
+      promptId: one(this.db, 'SELECT id FROM prompts ORDER BY id DESC LIMIT 1')!.id,
+      model: modelName(),
+      modelConfigured: this.canAnalyze(),
+    };
+  }
+  resetAnalysis(since?: string) {
+    if (!this.canAnalyze()) throw new Error('请先配置模型 API 密钥，未清除任何预警');
+    if (!this.acquire()) return undefined;
+    try {
+      if (
+        one(
+          this.db,
+          "SELECT id FROM jobs WHERE kind='analysis_reset' AND status IN ('running','interrupted') LIMIT 1",
+        )
+      ) {
+        this.release();
+        return undefined;
+      }
+      const result = transaction(this.db, () => {
+        const preview = this.resetPreview(since);
+        if (!preview.eligible)
+          throw new Error('所选范围内没有正文完整的可分析文章，未清除任何预警');
+        const selected = all(
+          this.db,
+          `SELECT id FROM news WHERE trim(body)<>'' AND status<>'duplicate' ${
+            since ? 'AND published_at>=?' : ''
+          } ORDER BY id`,
+          ...(since ? [since] : []),
+        );
+        const summary = {
+          ...preview,
+          deletedAlerts: preview.alerts,
+          total: selected.length,
+          completed: 0,
+          failed: 0,
+          processed: 0,
+          analyzed: 0,
+        };
+        run(
+          this.db,
+          "UPDATE jobs SET status='interrupted',finished_at=?,error='原任务中断，由模型分析重置接管' WHERE status='running'",
+          now(),
+        );
+        run(
+          this.db,
+          "UPDATE analyses SET status='interrupted',finished_at=? WHERE status='running'",
+          now(),
+        );
+        const jobId = Number(
+          run(
+            this.db,
+            "INSERT INTO jobs(kind,status,started_at,summary) VALUES('analysis_reset','running',?,?)",
+            now(),
+            JSON.stringify(summary),
+          ).lastInsertRowid,
+        );
+        run(this.db, 'DELETE FROM reads');
+        run(this.db, 'DELETE FROM alerts');
+        // 保留 AUTOINCREMENT 序列，防止旧游标与新预警 ID 冲突。
+        const generation = JSON.parse(
+          one(this.db, "SELECT value FROM settings WHERE key='feedGeneration'")?.value || '0',
+        );
+        setSetting(this.db, 'feedGeneration', generation + 1);
+        run(
+          this.db,
+          "UPDATE news SET status='reset_excluded',error=NULL WHERE trim(body)<>'' AND status<>'duplicate'",
+        );
+        for (const article of selected) {
+          run(
+            this.db,
+            "INSERT INTO reanalysis_queue(job_id,news_id,status) VALUES(?,?,'pending')",
+            jobId,
+            article.id,
+          );
+          run(this.db, "UPDATE news SET status='pending',error=NULL WHERE id=?", article.id);
+        }
+        return { jobId, ...summary };
+      });
+      this.runActive(() => this.executeReset(result.jobId));
+      return result;
+    } catch (e) {
+      this.release();
+      throw e;
+    }
+  }
   tick() {
     if (this.busy) return;
     const cfg = config(this.db);
     const last = one(this.db, 'SELECT started_at FROM jobs ORDER BY id DESC LIMIT 1');
     const unfinished =
-      one(this.db, "SELECT id FROM jobs WHERE status='running' LIMIT 1") ||
-      one(this.db, "SELECT id FROM news WHERE status IN ('pending','analyzing') LIMIT 1");
+      one(
+        this.db,
+        "SELECT id FROM jobs WHERE status='running' OR (kind='analysis_reset' AND status='interrupted') LIMIT 1",
+      ) || one(this.db, "SELECT id FROM news WHERE status IN ('pending','analyzing') LIMIT 1");
     if (
       unfinished ||
       !last ||
@@ -199,6 +305,15 @@ export class Worker {
       this.launch('scheduled');
   }
   launch(kind = 'manual', retryId?: number) {
+    if (!this.acquire()) return false;
+    const reset = one(
+      this.db,
+      "SELECT id FROM jobs WHERE kind='analysis_reset' AND status IN ('running','interrupted') ORDER BY id DESC LIMIT 1",
+    );
+    this.runActive(() => (reset ? this.executeReset(reset.id) : this.execute(kind, retryId)));
+    return true;
+  }
+  private acquire() {
     if (this.busy) return false;
     const acquired = transaction(this.db, () => {
       const lock = one(this.db, "SELECT * FROM locks WHERE name='worker'");
@@ -211,13 +326,135 @@ export class Worker {
       );
       return true;
     });
-    if (!acquired) return false;
+    return acquired;
+  }
+  private release() {
+    run(this.db, "DELETE FROM locks WHERE name='worker' AND owner=?", this.owner);
+  }
+  private runActive(task: () => Promise<void>) {
     this.busy = true;
-    this.active = this.execute(kind, retryId).finally(() => {
-      run(this.db, "DELETE FROM locks WHERE name='worker' AND owner=?", this.owner);
+    this.active = task().finally(() => {
+      this.release();
       this.busy = false;
     });
-    return true;
+  }
+  private async executeReset(jobId: number) {
+    const db = this.db;
+    const job = one(db, 'SELECT * FROM jobs WHERE id=?', jobId)!;
+    const summary = JSON.parse(job.summary);
+    const heartbeat = setInterval(
+      () =>
+        run(
+          db,
+          "UPDATE locks SET expires_at=? WHERE name='worker' AND owner=?",
+          new Date(Date.now() + 180_000).toISOString(),
+          this.owner,
+        ),
+      30000,
+    );
+    const updateProgress = () => {
+      const counts = one(
+        db,
+        "SELECT COUNT(*) AS total,COALESCE(SUM(status='completed'),0) AS completed,COALESCE(SUM(status='failed'),0) AS failed FROM reanalysis_queue WHERE job_id=?",
+        jobId,
+      )!;
+      const progress = {
+        ...summary,
+        ...counts,
+        processed: counts.completed + counts.failed,
+        analyzed: counts.completed + counts.failed,
+      };
+      run(db, 'UPDATE jobs SET summary=? WHERE id=?', JSON.stringify(progress), jobId);
+      return progress;
+    };
+    try {
+      transaction(db, () => {
+        run(db, "UPDATE jobs SET status='running',finished_at=NULL,error=NULL WHERE id=?", jobId);
+        run(
+          db,
+          "UPDATE analyses SET status='interrupted',finished_at=? WHERE status='running' AND news_id IN (SELECT news_id FROM reanalysis_queue WHERE job_id=? AND status='running')",
+          now(),
+          jobId,
+        );
+        run(
+          db,
+          "UPDATE news SET status='pending' WHERE status='analyzing' AND id IN (SELECT news_id FROM reanalysis_queue WHERE job_id=? AND status='running')",
+          jobId,
+        );
+        run(
+          db,
+          "UPDATE reanalysis_queue SET status='pending' WHERE job_id=? AND status='running'",
+          jobId,
+        );
+      });
+      updateProgress();
+      for (const item of all(
+        db,
+        "SELECT news_id FROM reanalysis_queue WHERE job_id=? AND status='pending' ORDER BY news_id",
+        jobId,
+      )) {
+        run(
+          db,
+          "UPDATE reanalysis_queue SET status='running' WHERE job_id=? AND news_id=?",
+          jobId,
+          item.news_id,
+        );
+        try {
+          await analyzeNews(db, item.news_id, this.analyzer, summary.promptId);
+          const news = one(db, 'SELECT status,error FROM news WHERE id=?', item.news_id)!;
+          const failed = news.status === 'analysis_failed';
+          run(
+            db,
+            'UPDATE reanalysis_queue SET status=?,error=? WHERE job_id=? AND news_id=?',
+            failed ? 'failed' : 'completed',
+            failed ? news.error : null,
+            jobId,
+            item.news_id,
+          );
+        } catch (e) {
+          const error = e instanceof Error ? e.message : '分析失败';
+          run(
+            db,
+            "UPDATE news SET status='analysis_failed',error=? WHERE id=?",
+            error,
+            item.news_id,
+          );
+          run(
+            db,
+            "UPDATE reanalysis_queue SET status='failed',error=? WHERE job_id=? AND news_id=?",
+            error,
+            jobId,
+            item.news_id,
+          );
+        }
+        updateProgress();
+      }
+      const progress = updateProgress();
+      const errors = all(
+        db,
+        "SELECT error FROM reanalysis_queue WHERE job_id=? AND status='failed' LIMIT 20",
+        jobId,
+      )
+        .map((r) => r.error)
+        .join('\n');
+      run(
+        db,
+        'UPDATE jobs SET status=?,finished_at=?,error=? WHERE id=?',
+        progress.failed ? 'partial_failed' : 'completed',
+        now(),
+        errors || null,
+        jobId,
+      );
+    } catch (e) {
+      run(
+        db,
+        "UPDATE jobs SET status='interrupted',error=? WHERE id=?",
+        e instanceof Error ? e.message : '重置分析中断',
+        jobId,
+      );
+    } finally {
+      clearInterval(heartbeat);
+    }
   }
   private async execute(kind: string, retryId?: number) {
     const db = this.db;

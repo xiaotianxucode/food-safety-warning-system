@@ -21,6 +21,7 @@ export function openDatabase(path = process.env.DATABASE_PATH || './data/food-sa
     CREATE TABLE IF NOT EXISTS reads(user_id INTEGER NOT NULL REFERENCES users(id),alert_id INTEGER NOT NULL REFERENCES alerts(id),read_at TEXT NOT NULL,PRIMARY KEY(user_id,alert_id));
     CREATE TABLE IF NOT EXISTS notifications(user_id INTEGER PRIMARY KEY REFERENCES users(id),cursor INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY,owner TEXT NOT NULL,expires_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS reanalysis_queue(job_id INTEGER NOT NULL REFERENCES jobs(id),news_id INTEGER NOT NULL REFERENCES news(id),status TEXT NOT NULL DEFAULT 'pending',error TEXT,PRIMARY KEY(job_id,news_id));
     INSERT OR IGNORE INTO migrations VALUES(1,datetime('now'));`);
   return db;
 }
