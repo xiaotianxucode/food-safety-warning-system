@@ -1,11 +1,12 @@
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
 import { openDatabase, one, all, run, now, type DB } from '../server/db.js';
 import { initialize, ingest, analyzeNews, setSetting, Worker } from '../server/service.js';
+import { narrowInitialTaskToWeek } from '../server/maintenance.js';
 import {
   createTask,
   executeTask,
   crawlState,
-  threeMonthsBefore,
+  weekBefore,
   windowContains,
 } from '../server/collection.js';
 let db: DB;
@@ -25,6 +26,95 @@ const article = (date: string, body: string) =>
 const entry = (id: number, date: string) =>
   `<li class="catlist_li"><span>${date}</span><a href="https://news.foodmate.net/2026/10/${id}.html">新闻${id}</a></li>`;
 const none = async () => ({ shouldWarn: false, summary: '这是样例，无需预警', alerts: [] });
+it('收窄旧首次任务时删除一周前新闻及预警，保留一周内已完成结果和待分析队列', async () => {
+  const job = createTask(db, 'manual', undefined, '2026-10-27T04:00:00.000Z');
+  const summary = JSON.parse(one(db, 'SELECT summary FROM jobs WHERE id=?', job)!.summary);
+  run(
+    db,
+    'UPDATE jobs SET summary=? WHERE id=?',
+    JSON.stringify({ ...summary, windowStart: '2026-07-27T04:00:00.000Z', initialDays: undefined }),
+    job,
+  );
+  const ids: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const pub = [
+      '2026-10-10T03:00:00.000Z',
+      '2026-10-25T03:00:00.000Z',
+      '2026-10-26T03:00:00.000Z',
+    ][i];
+    const n = ingest(
+      db,
+      { title: `测试新闻${i}`, body: base + i, publishedAt: pub },
+      `https://news.foodmate.net/2026/10/${85000 + i}.html`,
+    );
+    ids.push(n.id);
+    if (i < 2)
+      await analyzeNews(db, n.id, async () => ({
+        shouldWarn: true,
+        summary: '不合格食品',
+        alerts: [
+          {
+            food: '草莓',
+            region: '日本',
+            company: '',
+            batch: '',
+            factor: '农药残留不合格',
+            impact: '涉事产品退运',
+            advice: '关注涉事批次',
+            evidence: '日本草莓检出残留农药不合格，涉事产品退运',
+            seasoning: false,
+          },
+        ],
+      }));
+    const analysis = one(db, 'SELECT id FROM analyses WHERE news_id=?', n.id);
+    run(
+      db,
+      "INSERT INTO task_items(job_id,url,news_id,published_at,result,model_status,analysis_id) VALUES(?,?,?,?,'new',?,?)",
+      job,
+      `https://news.foodmate.net/2026/10/${85000 + i}.html`,
+      n.id,
+      pub,
+      i < 2 ? 'warning' : 'pending',
+      analysis?.id || null,
+    );
+  }
+  run(
+    db,
+    "INSERT INTO users(username,password_hash,role,created_at) VALUES('reader','test','user',?)",
+    now(),
+  );
+  run(db, 'INSERT INTO reads VALUES(1,1,?)', now());
+  run(db, "INSERT INTO reanalysis_queue VALUES(?,?,'completed',NULL)", job, ids[0]);
+  const result = narrowInitialTaskToWeek(db, job);
+  expect(result).toMatchObject({
+    removedNews: 1,
+    removedAlerts: 1,
+    remainingNews: 2,
+    remainingAlerts: 1,
+    start: '2026-10-20T04:00:00.000Z',
+  });
+  expect(one(db, 'SELECT id FROM news WHERE id=?', ids[0])).toBeUndefined();
+  expect(all(db, 'SELECT * FROM reads')).toHaveLength(0);
+  expect(all(db, 'SELECT * FROM sources')).toHaveLength(2);
+  expect(all(db, 'SELECT * FROM reanalysis_queue')).toHaveLength(0);
+  expect(one(db, 'SELECT status FROM news WHERE id=?', ids[1])?.status).toBe('published');
+  expect(JSON.parse(one(db, 'SELECT summary FROM jobs WHERE id=?', job)!.summary)).toMatchObject({
+    initialDays: 7,
+    added: 2,
+    warningArticles: 1,
+    modelPending: 1,
+  });
+  expect(one(db, "SELECT value FROM settings WHERE key='feedGeneration'")?.value).toBe('1');
+  narrowInitialTaskToWeek(db, job, '2026-10-28T04:00:00.000Z');
+  expect(JSON.parse(one(db, 'SELECT summary FROM jobs WHERE id=?', job)!.summary)).toMatchObject({
+    windowStart: '2026-10-21T04:00:00.000Z',
+    windowEnd: '2026-10-28T04:00:00.000Z',
+    phase: 'scanning',
+  });
+  expect(all(db, "SELECT * FROM task_pages WHERE job_id=? AND status='pending'", job)).toHaveLength(
+    1,
+  );
+});
 function hooks(fetcher: (url: string) => Promise<string>, analyzer: any = none) {
   return {
     fetcher,
@@ -33,9 +123,9 @@ function hooks(fetcher: (url: string) => Promise<string>, analyzer: any = none) 
     pause: async () => {},
   };
 }
-it('首次三个月按北京时间自然月计算，增量窗口左开右闭', () => {
-  expect(threeMonthsBefore('2026-05-31T04:00:00.000Z')).toBe('2026-02-28T04:00:00.000Z');
-  expect(threeMonthsBefore('2024-05-31T04:00:00.000Z')).toBe('2024-02-29T04:00:00.000Z');
+it('首次范围为连续7天，增量窗口左开右闭', () => {
+  expect(weekBefore('2026-05-31T04:00:00.000Z')).toBe('2026-05-24T04:00:00.000Z');
+  expect(weekBefore('2024-05-31T04:00:00.000Z')).toBe('2024-05-24T04:00:00.000Z');
   expect(
     windowContains(
       '2026-10-27T04:00:00.000Z',
@@ -53,12 +143,12 @@ it('首次三个月按北京时间自然月计算，增量窗口左开右闭', (
     ),
   ).toBe(true);
 });
-it('首次自动翻过10页，处理超过200篇，遇到三个月边界停止', async () => {
+it('首次自动翻过10页，处理超过200篇，遇到一周边界停止', async () => {
   const pages = new Map<string, string>();
   for (let p = 1; p <= 14; p++) {
     const first = (p - 1) * 15;
     const rows = Array.from({ length: Math.min(15, 205 - first) }, (_, i) =>
-      entry(80000 + first + i, '2026-08-15 12:00'),
+      entry(80000 + first + i, '2026-10-23 12:00'),
     ).join('');
     pages.set(
       p === 1 ? source : `${source}list_${p}.html`,
@@ -72,7 +162,7 @@ it('首次自动翻过10页，处理超过200篇，遇到三个月边界停止',
   const fetcher = vi.fn(async (url: string) => {
     if (pages.has(url)) return pages.get(url)!;
     const id = url.match(/\/(\d+)\.html$/)?.[1];
-    if (id && id !== '99999') return article('2026-08-15 12:00', base + id);
+    if (id && id !== '99999') return article('2026-10-23 12:00', base + id);
     throw Error('不应请求：' + url);
   });
   const model = vi.fn(none);
@@ -87,7 +177,7 @@ it('首次自动翻过10页，处理超过200篇，遇到三个月边界停止',
     modelFailed: 0,
     pages: 15,
     mode: 'initial',
-    windowStart: '2026-07-27T04:00:00.000Z',
+    windowStart: '2026-10-20T04:00:00.000Z',
   });
   expect(model).toHaveBeenCalledTimes(205);
   expect(fetcher.mock.calls.some(([u]) => u.includes('list_16') || u.includes('99999'))).toBe(
@@ -150,7 +240,7 @@ it('来源读取失败不推进截止时刻，首次范围下限不会随着重�
   const next = createTask(db, 'manual', undefined, '2026-10-28T04:00:00.000Z');
   expect(
     JSON.parse(one(db, 'SELECT summary FROM jobs WHERE id=?', next)!.summary).windowStart,
-  ).toBe('2026-07-27T04:00:00.000Z');
+  ).toBe('2026-10-20T04:00:00.000Z');
 });
 it('HTTP成功但返回验证码等无有效列表页面时不能推进边界', async () => {
   const job = createTask(db, 'manual', undefined, '2026-10-27T04:00:00.000Z');

@@ -103,8 +103,8 @@ export function TaskSummary({ job }: { job: any }) {
       </p>
       {s.windowStart && job.kind !== 'model_retry' && (
         <small>
-          {s.mode === 'initial' ? '首次近三个月' : '增量窗口'}：{full(s.windowStart)}{' '}
-          {s.startInclusive ? '≤' : '＜'} 新闻发布时间 ≤ {full(s.windowEnd)}
+          {s.mode === 'initial' ? (s.initialDays === 7 ? '首次近一周' : '首次采集') : '增量窗口'}：
+          {full(s.windowStart)} {s.startInclusive ? '≤' : '＜'} 新闻发布时间 ≤ {full(s.windowEnd)}
         </small>
       )}
     </div>
@@ -166,7 +166,7 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
           <p>
             {state?.initialized
               ? '上次成功采集截止：' + full(state.lastSuccessEnd)
-              : '尚未完成近三个月采集。首次触发时将从当时往前三个月开始，保留已有新闻和预警。'}
+              : '尚未完成近一周采集。首次触发时将从当时往前7天开始。'}
           </p>
           <p>
             模型失败重试只处理已有正文的失败新闻，不重新采集、不清除预警。模型分析重置会清空全部旧预警，需单独确认。

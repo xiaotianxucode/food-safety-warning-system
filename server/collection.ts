@@ -1,23 +1,9 @@
 import { all, one, run, transaction, now, type DB } from './db.js';
 import { extractArticle, extractListing } from './crawler.js';
 export const DAY = 86400_000;
-export function threeMonthsBefore(end: string) {
-  const local = new Date(Date.parse(end) + 8 * 3600_000);
-  const year = local.getUTCFullYear(),
-    month = local.getUTCMonth() - 3;
-  const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return new Date(
-    Date.UTC(
-      year,
-      month,
-      Math.min(last, local.getUTCDate()),
-      local.getUTCHours(),
-      local.getUTCMinutes(),
-      local.getUTCSeconds(),
-      local.getUTCMilliseconds(),
-    ) -
-      8 * 3600_000,
-  ).toISOString();
+export const INITIAL_DAYS = 7;
+export function weekBefore(end: string) {
+  return new Date(Date.parse(end) - INITIAL_DAYS * DAY).toISOString();
 }
 export function crawlState(db: DB) {
   return JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawlState'")!.value);
@@ -37,11 +23,12 @@ export function createTask(db: DB, kind: string, targetIds?: number[], end = now
   const retry = kind === 'model_retry' || kind === 'crawl_retry';
   const start = state.initialized
     ? state.lastSuccessEnd
-    : state.initialStart || threeMonthsBefore(end);
+    : (state.initialDays === INITIAL_DAYS ? state.initialStart : undefined) || weekBefore(end);
   const summary: any = {
     version: 2,
     phase: retry ? 'analyzing' : 'scanning',
     mode: retry ? 'retry' : state.initialized ? 'incremental' : 'initial',
+    initialDays: INITIAL_DAYS,
     windowStart: start,
     windowEnd: end,
     startInclusive: !state.initialized,
@@ -85,8 +72,8 @@ export function createTask(db: DB, kind: string, targetIds?: number[], end = now
       const cfg = JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawler'")!.value);
       for (const url of cfg.sources)
         run(db, 'INSERT OR IGNORE INTO task_pages(job_id,url) VALUES(?,?)', id, url);
-      if (!state.initialized && !state.initialStart)
-        saveCrawlState(db, { ...state, initialStart: start });
+      if (!state.initialized)
+        saveCrawlState(db, { ...state, initialStart: start, initialDays: INITIAL_DAYS });
     }
     return id;
   });
