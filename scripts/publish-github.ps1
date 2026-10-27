@@ -19,8 +19,10 @@ if (-not $repo) {
     $repo = Invoke-RestMethod -Uri 'https://api.github.com/user/repos' -Method Post -Headers $githubHeaders -Body ([Text.Encoding]::UTF8.GetBytes($repoBody)) -ContentType 'application/json; charset=utf-8'
 }
 if (-not $repo.private) { throw '同名仓库为公开仓库，停止推送以保护私有代码。' }
-$remote = git remote get-url origin 2>$null
-if ($LASTEXITCODE -eq 0 -and $remote -ne $repo.clone_url) { throw '现有 origin 与目标仓库不同，停止修改。' }
+$remote = $null
+$remoteNames = @(git remote)
+if ($remoteNames -contains 'origin') { $remote = git remote get-url origin }
+if ($remote -and $remote -ne $repo.clone_url) { throw '现有 origin 与目标仓库不同，停止修改。' }
 if (-not $remote) { git remote add origin $repo.clone_url; if ($LASTEXITCODE -ne 0) { throw '添加远程仓库失败。' } }
 git push -u origin main
 if ($LASTEXITCODE -ne 0) { throw '推送失败，未进行强制覆盖。请检查仓库权限或现有历史。' }
