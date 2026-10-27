@@ -69,7 +69,6 @@ npm.cmd start
 
 - `server/`：Express API、SQLite 迁移、账号与会话、采集器、持久化任务锁、模型分析、定时调度。
 - `src/`：React 前台与开发者后台，适配桌面和移动端。
-- `tests/`：业务与权限测试、隔离数据库的浏览器端验收。
 
 数据库默认位于 `data/food-safety.sqlite`。首次打开自动执行幂等建表迁移，`migrations` 保存版本。包含用户、会话、新闻、来源、任务、分析结果、提示词、预警、已读、提醒游标、配置和任务锁。进程间使用数据库租约互斥，30 秒续约，租约过期后恢复中断状态；仍推荐单服务实例。会话令牌以哈希入库，密码使用带随机盐的 scrypt；停用账号、重置或修改密码使会话失效。
 
@@ -98,13 +97,11 @@ npm.cmd start
 ## 验证
 
 ```powershell
+npm.cmd run check
 npm.cmd run build
-npm.cmd test
-npx.cmd playwright install chromium
-npm.cmd run test:e2e
 ```
 
-业务测试覆盖同正文跨链接去重、一篇多对象、无风险新闻、模型判定与证据校验、提示词升级、模型失败重试、任务锁与恢复、越权、离线未读、多标签页提醒、撤下和提示词版本。浏览器测试使用独立内存数据库和明确标记的测试样例。GitHub Actions 执行构建、业务及浏览器测试。测试产生的 `test-results/`、`playwright-report/` 和日志可在验证后删除；保留 `dist/`、`node_modules/`、`.env` 及 `data/` 供当前系统运行。
+开发阶段的测试源码、测试配置、格式化配置和一次性维护脚本已按精简要求清理，可从 Git 历史恢复。GitHub Actions 保留安装及生产构建检查。当前运行需要保留 `dist/`、`node_modules/`、`.env`、`data/`、启动与分享脚本；公网隧道还需要 `.tools/cloudflared.exe` 和 `.share/` 中的状态及运行日志。所有 Markdown 文档保留。
 
 ## 服务器部署
 
@@ -134,10 +131,10 @@ docker compose up -d
 
 本地 Git 使用 `main` 分支。`.gitignore` 排除 `.env`、含密钥的原始需求文档、数据库、采集数据、凭据与测试产物。不要使用 `git add -f` 提交这些文件。
 
-在 Git 凭据管理器已登录 GitHub 时，运行：
+现有私有仓库已配置为 `origin`。提交代码后可直接推送：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\publish-github.ps1
+git push
 ```
 
-脚本使用现有登录创建 `food-safety-warning-system` **私有仓库** 并正常推送，不强制覆盖历史。没有有效登录或权限时停止；也可使用 GitHub CLI 执行 `gh auth login`，再执行 `gh repo create food-safety-warning-system --private --source=. --remote=origin --push`。随后在 GitHub 仓库 Settings → Collaborators 邀请指定协作者。
+仓库为 `food-safety-warning-system` **私有仓库**，首次发布辅助脚本已完成用途并清理。需要分享代码时，在 GitHub 仓库 Settings → Collaborators 邀请指定协作者。网站的临时公网访问使用上面的分享脚本，与代码仓库权限分开。

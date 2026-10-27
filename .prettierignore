@@ -1,9 +1,0 @@
-node_modules
-dist
-data
-package-lock.json
-.env
-*.docx
-test-results
-playwright-report
-CREDENTIALS.local.txt
