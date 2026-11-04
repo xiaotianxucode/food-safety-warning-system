@@ -9,7 +9,7 @@ import { config, initialize, Worker, setSetting } from './service.js';
 import { canonicalUrl } from './crawler.js';
 import { callModel, modelName } from './model.js';
 import { SOURCE_DEFINITIONS, sourceName } from './source-registry.js';
-import { crawlState, saveCrawlState } from './collection.js';
+import { crawlState, refreshSchedule } from './collection.js';
 import { failureCounts } from './failure-counts.js';
 declare global {
   namespace Express {
@@ -161,7 +161,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
     ).map(serialize);
     const job = one(
       db,
-      "SELECT status,started_at,finished_at FROM jobs WHERE kind IN ('manual','scheduled') ORDER BY id DESC LIMIT 1",
+      "SELECT status,started_at,finished_at FROM jobs WHERE kind IN ('manual','scheduled','maintenance','configuration') ORDER BY id DESC LIMIT 1",
     );
     res.json({
       items,
@@ -398,7 +398,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
     transaction(db, () => {
       if (input.crawler) {
         setSetting(db, 'crawler', { intervalHours: 24, sources: [...new Set(input.crawler.sources)] });
-        saveCrawlState(db,{...crawlState(db),nextRunAt:now()});
+        refreshSchedule(db);
       }
       const old = one(db, 'SELECT content FROM prompts ORDER BY id DESC LIMIT 1');
       if (input.prompt !== undefined && old?.content !== input.prompt)

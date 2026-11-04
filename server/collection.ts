@@ -9,11 +9,30 @@ export const weekBefore=(end:string)=>new Date(Date.parse(end)-INITIAL_DAYS*DAY)
 export const crawlState=(db:DB)=>JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawlState'")!.value);
 export function saveCrawlState(db:DB,state:any) {run(db,"INSERT INTO settings VALUES('crawlState',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify(state));}
 export const windowContains=(start:string,end:string,date:string,inclusive:boolean)=>(inclusive?date>=start:date>start)&&date<=end;
+export function automaticDue(db:DB,at=now()) {
+  const state=crawlState(db);
+  const due=state.lastRunAt?Date.parse(state.lastRunAt)+DAY:Date.parse(state.nextRunAt);
+  return Number.isFinite(due)&&Date.parse(at)>=due;
+}
+export function refreshSchedule(db:DB,at=now()) {
+  const state=crawlState(db);
+  const enabled=JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value).sources as string[];
+  const states=all(db,'SELECT * FROM source_states').filter(s=>enabled.includes(s.url));
+  const latest=one(db,"SELECT started_at FROM jobs WHERE kind IN ('manual','scheduled') ORDER BY started_at DESC,id DESC LIMIT 1");
+  const lastRunAt=state.lastRunAt||latest?.started_at||null;
+  const ends=states.map(s=>s.last_end).filter(Boolean).sort();
+  const nextRunAt=lastRunAt?new Date(Date.parse(lastRunAt)+DAY).toISOString():state.nextRunAt||at;
+  const next={...state,scheduleVersion:2,lastRunAt,nextRunAt,initialized:states.length===enabled.length&&states.every(s=>!!s.last_end),lastSuccessEnd:ends[0]||null,initialDays:3};
+  saveCrawlState(db,next);
+  for(const s of states)run(db,'UPDATE source_states SET next_run_at=? WHERE url=?',nextRunAt,s.url);
+  return next;
+}
 export function createTask(db:DB,kind:string,ids?:number[],end=now(),withinTransaction=false) {
   if(!['manual','scheduled','model_retry'].includes(kind))throw new Error('不支持的任务类型');
   if(kind==='model_retry'&&ids?.length!==1)throw new Error('请从失败暂存区选择单篇新闻重试');
   const write=()=>{
-    const summary:any={version:3,phase:'streaming',initialDays:3,promptId:one(db,'SELECT id FROM prompts ORDER BY id DESC LIMIT 1')!.id};
+    if(kind==='scheduled'&&!automaticDue(db,end))throw new Error('尚未到24小时自动采集时间');
+    const summary:any={version:3,phase:'streaming',initialDays:3,trigger:kind==='manual'?'manual':kind==='scheduled'?(crawlState(db).lastRunAt?'scheduled':'initial'):'retry',promptId:one(db,'SELECT id FROM prompts ORDER BY id DESC LIMIT 1')!.id};
     const id=Number(run(db,"INSERT INTO jobs(kind,status,started_at,summary) VALUES(?,'running',?,?)",kind,end,JSON.stringify(summary)).lastInsertRowid);
     if(kind==='model_retry') {
       for(const itemId of ids||[]) {
@@ -26,7 +45,6 @@ export function createTask(db:DB,kind:string,ids?:number[],end=now(),withinTrans
       const starts:string[]=[];
       for(const url of cfg.sources) {
         const state=one(db,'SELECT * FROM source_states WHERE url=?',url);
-        if(kind==='scheduled'&&state?.last_end&&state.next_run_at>end)continue;
         const start=state?.last_end||state?.initial_start||weekBefore(end);starts.push(start);
         run(db,'INSERT OR IGNORE INTO source_states(url,next_run_at,initial_start) VALUES(?,?,?)',url,end,start);
         run(db,'INSERT INTO job_sources(job_id,url,name,window_start,window_end,start_inclusive) VALUES(?,?,?,?,?,?)',id,url,sourceName(url),start,end,state?.last_end?0:1);
@@ -35,6 +53,7 @@ export function createTask(db:DB,kind:string,ids?:number[],end=now(),withinTrans
       summary.windowStart=starts.sort()[0];summary.windowEnd=end;summary.startInclusive=all(db,'SELECT * FROM job_sources WHERE job_id=? AND start_inclusive=0',id).length===0;
       summary.mode=summary.startInclusive?'initial':'incremental';
       run(db,'UPDATE jobs SET summary=? WHERE id=?',JSON.stringify(summary),id);
+      saveCrawlState(db,{...crawlState(db),scheduleVersion:2,lastRunAt:end,nextRunAt:new Date(Date.parse(end)+DAY).toISOString()});
     }
     return id;
   };
@@ -131,16 +150,11 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
     const errors=[...all(db,"SELECT error FROM task_pages WHERE job_id=? AND source_url=? AND status='failed'",id,source.url),...all(db,"SELECT error FROM task_items WHERE job_id=? AND source_name=? AND result IN ('read_failed','date_unknown')",id,source.name)];
     transaction(db,()=>{
       run(db,'UPDATE job_sources SET status=?,error=? WHERE job_id=? AND url=?',errors.length?'failed':'completed',errors.map(e=>e.error).join('\n')||null,id,source.url);
-      run(db,'INSERT INTO source_states(url,last_end,next_run_at) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET last_end=COALESCE(excluded.last_end,last_end),next_run_at=excluded.next_run_at',source.url,errors.length?null:source.window_end,new Date(errors.length?Date.now()+300000:Date.parse(source.window_end)+DAY).toISOString());
+      run(db,'INSERT INTO source_states(url,last_end,next_run_at) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET last_end=COALESCE(excluded.last_end,last_end),next_run_at=excluded.next_run_at',source.url,errors.length?null:source.window_end,new Date(Date.parse(source.window_end)+DAY).toISOString());
     });
   }
   const sources=all(db,'SELECT * FROM job_sources WHERE job_id=?',id);
-  {
-    const enabled=JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value).sources as string[];
-    const states=all(db,'SELECT * FROM source_states').filter(s=>enabled.includes(s.url));
-    const ends=states.map(s=>s.last_end).filter(Boolean).sort();
-    if(states.length)saveCrawlState(db,{initialized:states.length===enabled.length&&states.every(s=>!!s.last_end),lastSuccessEnd:ends[0]||null,nextRunAt:states.map(s=>s.next_run_at).sort()[0],initialDays:3});
-  }
+  refreshSchedule(db);
   const progress=taskProgress(db,id);const failed=progress.pageFailed+progress.readFailed+progress.dateUnknown+progress.modelFailed;
   run(db,'UPDATE jobs SET status=?,finished_at=?,error=?,summary=? WHERE id=?',failed?'partial_failed':'completed',now(),sources.filter(s=>s.error).map(s=>s.error).join('\n')||null,JSON.stringify({...progress,phase:'finished'}),id);
 }

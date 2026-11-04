@@ -1,5 +1,6 @@
 import { FailurePanel } from './failures';
 import { failureTotals, failureLabel, collectionCounts } from './failure-status';
+import { taskTitle, taskPhase } from './task-labels';
 import React, { useCallback, useEffect, useState } from 'react';
 type Props = {
   overview: any;
@@ -11,6 +12,8 @@ const names: Record<string, string> = {
   manual: '手动采集',
   scheduled: '自动采集',
   model_retry: '暂存区单篇重试',
+  maintenance: '维护补采（历史）',
+  configuration: '配置触发（历史）',
   crawl_retry: '采集失败重试',
   retry: '旧版单篇重试',
   running: '执行中',
@@ -91,10 +94,11 @@ export function TaskSummary({ job }: { job: any }) {
       {!!s.readingPending && <small>另有 {s.readingPending} 个链接待读取正文；链接数不代表新增或入库篇数。</small>}
       {s.windowStart && job.kind !== 'model_retry' && (
         <small>
-          {s.mode === 'initial' ? (s.initialDays === 3 ? '首次近三天' : '首次采集') : '增量窗口'}：
+          {job.kind==='maintenance'?'维护补采窗口':job.kind==='configuration'?'新增来源首次窗口（历史）':s.mode === 'initial' ? (s.initialDays === 3 ? '首次近三天' : '首次采集') : '增量窗口'}：
           {full(s.windowStart)} {s.startInclusive ? '≤' : '＜'} 新闻发布时间 ≤ {full(s.windowEnd)}
         </small>
       )}
+      {s.triggerNote&&<small>触发说明：{s.triggerNote}</small>}
     </div>
   );
 }
@@ -149,8 +153,8 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
         {active && (
           <div className="active-task">
             <strong>
-              当前任务 #{active.id} · {names[active.kind] || active.kind} ·{' '}
-              {names[JSON.parse(active.summary || '{}').phase] || '处理中'}
+              当前任务 #{active.id} · {taskTitle(active)} ·{' '}
+              {taskPhase(active) || '处理中'}
             </strong>
             <TaskSummary job={active} />
           </div>
@@ -212,7 +216,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
               }}
             >
               <option value="">全部任务</option>
-              {['manual', 'scheduled', 'model_retry'].map((k) => (
+              {['manual', 'scheduled', 'model_retry', 'maintenance', 'configuration'].map((k) => (
                 <option key={k} value={k}>
                   {names[k]}
                 </option>
@@ -254,7 +258,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
               {jobs.items.map((j: any) => (
                 <tr key={j.id}>
                   <td>
-                    #{j.id} · {names[j.kind] || j.kind}
+                    #{j.id} · {taskTitle(j)}
                   </td>
                   <td>
                     <small>开始 {full(j.started_at)}</small>
@@ -262,9 +266,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
                   </td>
                   <td>
                     <Status name={j.status} />
-                    {JSON.parse(j.summary || '{}').phase && (
-                      <small>{names[JSON.parse(j.summary).phase]}</small>
-                    )}
+                    {taskPhase(j) && <small>{taskPhase(j)}</small>}
                   </td>
                   <td>
                     <TaskSummary job={j} />
@@ -353,7 +355,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
           {data ? (
             <>
               <p>
-                {names[data.job.kind]} · <Status name={data.job.status} /> · 开始{' '}
+                {taskTitle(data.job)} · <Status name={data.job.status} /> · 开始{' '}
                 {full(data.job.started_at)}
               </p>
               <TaskSummary job={data.job} />

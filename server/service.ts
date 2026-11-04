@@ -3,7 +3,7 @@ import { all, one, run, transaction, now, type DB } from './db.js';
 import { DEFAULT_PROMPT } from './prompt.js';
 import { callModel } from './model.js';
 import { DEFAULT_SOURCES, fetchHtml } from './crawler.js';
-import { createTask, executeTask, taskProgress, crawlState, saveCrawlState } from './collection.js';
+import { createTask, executeTask, taskProgress, automaticDue, refreshSchedule, saveCrawlState } from './collection.js';
 import { pipelineSchema, pause } from './pipeline.js';
 export function setSetting(db:DB,key:string,value:unknown){run(db,'INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value));}
 export const config=(db:DB)=>JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value);
@@ -29,16 +29,20 @@ export function initialize(db:DB){
     }
     run(db,'INSERT INTO migrations VALUES(6,?)',now());
   });
+  if(!one(db,'SELECT version FROM migrations WHERE version=7'))transaction(db,()=>{
+    refreshSchedule(db);
+    run(db,'INSERT INTO migrations VALUES(7,?)',now());
+  });
 }
 export class Worker {
   busy=false; jobId?:number;
   private timer?:ReturnType<typeof setInterval>;private active?:Promise<void>;private owner=randomUUID();private stopping=false;
-  constructor(public db:DB,private fetcher=fetchHtml,private analyzer=callModel){}
+  constructor(public db:DB,private fetcher=fetchHtml,private analyzer=callModel,private clock=now){}
   start(){this.stopping=false;this.timer=setInterval(()=>this.tick(),60000);this.tick();}
   async stop(){this.stopping=true;if(this.timer)clearInterval(this.timer);await this.active;}
   canAnalyze(){return this.analyzer!==callModel||!!process.env.MODEL_API_KEY;}
   hasUnfinishedTask(){return !!one(this.db,"SELECT id FROM jobs WHERE status IN ('running','interrupted') LIMIT 1");}
-  tick(){if(!this.busy&&!this.stopping&&(this.hasUnfinishedTask()||Date.parse(crawlState(this.db).nextRunAt)<=Date.now()))this.launch('scheduled');}
+  tick(){if(!this.busy&&!this.stopping&&(this.hasUnfinishedTask()||automaticDue(this.db,this.clock())))this.launch('scheduled');}
   private acquire(){
     if(this.busy||this.stopping)return false;
     return transaction(this.db,()=>{
@@ -49,6 +53,7 @@ export class Worker {
   private release(){run(this.db,"DELETE FROM locks WHERE name='worker' AND owner=?",this.owner);}
   launch(kind='manual',retryId?:number){
     if(!['manual','scheduled','retry'].includes(kind))return false;
+    if(kind==='scheduled'&&!this.hasUnfinishedTask()&&!automaticDue(this.db,this.clock()))return false;
     if(kind==='retry'&&(this.hasUnfinishedTask()||!retryId||!one(this.db,"SELECT id FROM pipeline_items WHERE id=? AND status='failed' AND trim(body)<>''",retryId)))return false;
     if(!this.canAnalyze()||!this.acquire())return false;
     try {
@@ -57,7 +62,8 @@ export class Worker {
       if(!id){
         let ids:number[]|undefined;
         if(kind==='retry'){ids=[retryId!];kind='model_retry';}
-        id=createTask(this.db,kind,ids);
+        if(kind==='scheduled'&&!automaticDue(this.db,this.clock())){this.release();return false;}
+        id=createTask(this.db,kind,ids,this.clock());
       }
       this.runActive(id);return true;
     }catch(e){this.release();throw e;}

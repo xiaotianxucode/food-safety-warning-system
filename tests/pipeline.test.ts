@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase,all,one,run,now } from '../server/db.js';
 import {initialize,Worker,setSetting} from '../server/service.js';
-import {createTask,executeTask,taskProgress,DAY} from '../server/collection.js';
+import {createTask,executeTask,taskProgress,crawlState,refreshSchedule,DAY} from '../server/collection.js';
 import {stageArticle,analyzeStaged,attachmentText} from '../server/pipeline.js';
 import {validateAnalysis} from '../server/model.js';
 import {extractListing,extractArticle,canonicalUrl} from '../server/crawler.js';
 import {createApp} from '../server/app.js';
 import {failureCounts} from '../server/failure-counts.js';
 import {failureTotals,failureLabel,collectionCounts} from '../src/failure-status.js';
+import {taskTitle,taskPhase} from '../src/task-labels.js';
 import {hashPassword} from '../server/auth.js';
 import * as XLSX from 'xlsx';
 const END='2026-11-04T12:00:00.000Z';
@@ -19,7 +20,8 @@ const warning={shouldWarn:true,summary:'涉事草莓检出农药残留不合格�
 const article=(text=body)=>({title:'固定验证样例',body:text,publishedAt:'2026-11-04T02:00:00.000Z',attachments:[]});
 const html=(text=body)=>`<h1>固定验证样例</h1><p>时间：2026-11-04 10:00</p><div id="article">${text}</div>`;
 const list=(ids:number[])=>ids.map(id=>`<li class="catlist_li"><span>2026-11-04 10:00</span><a href="/2026/11/${id}.html">固定样例${id}</a></li>`).join('');
-function db(){const d=openDatabase(':memory:');initialize(d);setSetting(d,'crawler',{intervalHours:24,sources:[ROOT]});return d;}
+function db(){const d=openDatabase(':memory:');initialize(d);setSetting(d,'crawler',{intervalHours:24,sources:[ROOT]});setSetting(d,'crawlState',{initialized:false,nextRunAt:END,lastRunAt:null,initialDays:3,scheduleVersion:2});return d;}
+async function idle(worker:Worker){for(let i=0;worker.busy&&i<1000;i++)await new Promise(r=>setTimeout(r,1));assert.equal(worker.busy,false);}
 const execute=(d:any,id:number,fetcher:any,analyzer:any)=>executeTask(d,id,{fetcher,analyzer,enrich:async a=>a,pause:async()=>{}});
 
 test('失败提示只分采集与模型分析两类，旧记录细项合并且保留正确单位',()=>{
@@ -67,11 +69,38 @@ test('首次72小时；断网超过24h后补齐原窗口；失败源保留初始
  assert.equal(one(d,'SELECT window_start FROM job_sources WHERE job_id=?',id)!.window_start,later);
  assert.equal(one(d,'SELECT start_inclusive FROM job_sources WHERE job_id=?',id)!.start_inclusive,0);d.close();
 });
-test('失败源补采不会提前重跑尚未到期的成功源',async()=>{
+test('失败源保留缺口，但不会在24小时内提前新建自动任务',async()=>{
  const d=db();const other='https://www.cfsn.cn/news/2037.html';setSetting(d,'crawler',{intervalHours:24,sources:[ROOT,other]});
  const id=createTask(d,'scheduled',undefined,END);await execute(d,id,async(url:string)=>{if(url===other)throw new Error('offline');return '暂无新闻';},async()=>noWarning);
- const later=new Date(Date.parse(END)+600000).toISOString();const next=createTask(d,'scheduled',undefined,later);
- assert.deepEqual(all(d,'SELECT url FROM job_sources WHERE job_id=?',next).map(s=>s.url),[other]);d.close();
+ const later=new Date(Date.parse(END)+600000).toISOString();assert.throws(()=>createTask(d,'scheduled',undefined,later),/24小时/);assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);
+ assert.equal(crawlState(d).nextRunAt,new Date(Date.parse(END)+DAY).toISOString());
+ const next=createTask(d,'scheduled',undefined,new Date(Date.parse(END)+DAY).toISOString());
+ assert.deepEqual(all(d,'SELECT url FROM job_sources WHERE job_id=? ORDER BY rowid',next).map(s=>s.url),[ROOT,other]);
+ assert.equal(one(d,'SELECT window_start FROM job_sources WHERE job_id=? AND url=?',next,other)!.window_start,new Date(Date.parse(END)-3*DAY).toISOString());d.close();
+});
+test('统一24小时调度：配置保存、重复tick及重启不新增任务，到期和离线补采只各运行一次',async()=>{
+ const d=db();let clock=END;const fetcher=async()=>'<div>暂无新闻</div>';const worker=new Worker(d,fetcher,async()=>noWarning,()=>clock);
+ try{
+  worker.tick();worker.tick();await idle(worker);assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);
+  clock=new Date(Date.parse(END)+600000).toISOString();setSetting(d,'crawler',{intervalHours:24,sources:[ROOT,'https://www.cfsn.cn/news/2037.html']});refreshSchedule(d,clock);
+  worker.tick();await idle(worker);assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);assert.equal(crawlState(d).nextRunAt,new Date(Date.parse(END)+DAY).toISOString());
+  const restarted=new Worker(d,fetcher,async()=>noWarning,()=>clock);restarted.start();await idle(restarted);await restarted.stop();assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);
+  clock=new Date(Date.parse(END)+DAY-1).toISOString();worker.tick();assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);
+  clock=new Date(Date.parse(END)+DAY).toISOString();worker.tick();worker.tick();await idle(worker);assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,2);
+  const newSource=one(d,'SELECT * FROM job_sources WHERE job_id=2 AND url=?','https://www.cfsn.cn/news/2037.html')!;assert.equal(newSource.window_start,new Date(Date.parse(clock)-3*DAY).toISOString());
+  clock=new Date(Date.parse(END)+4*DAY).toISOString();worker.tick();await idle(worker);worker.tick();assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,3);
+  const catchup=one(d,'SELECT * FROM job_sources WHERE job_id=3 AND url=?',ROOT)!;assert.equal(catchup.window_start,new Date(Date.parse(END)+DAY).toISOString());assert.equal(catchup.window_end,clock);
+ }finally{await worker.stop();d.close();}
+});
+test('手动采集明确记为manual，后续自动采集从手动开始时刻计24小时',async()=>{
+ const d=db();let clock=END;const worker=new Worker(d,async()=>'<div>暂无新闻</div>',async()=>noWarning,()=>clock);
+ try{worker.tick();await idle(worker);clock=new Date(Date.parse(END)+3600000).toISOString();assert.ok(worker.launch());await idle(worker);assert.equal(one(d,'SELECT kind FROM jobs WHERE id=2')!.kind,'manual');assert.equal(crawlState(d).nextRunAt,new Date(Date.parse(clock)+DAY).toISOString());worker.tick();assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,2);}finally{await worker.stop();d.close();}
+});
+test('恢复未完成任务复用任务编号，结束记录不再重复显示完成阶段',async()=>{
+ const d=db();const id=createTask(d,'scheduled',undefined,END);run(d,"UPDATE jobs SET status='interrupted' WHERE id=?",id);let clock=new Date(Date.parse(END)+600000).toISOString();const worker=new Worker(d,async()=>'<div>暂无新闻</div>',async()=>noWarning,()=>clock);
+ try{worker.tick();await idle(worker);assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);assert.equal(one(d,'SELECT status FROM jobs WHERE id=?',id)!.status,'completed');assert.equal(crawlState(d).lastRunAt,END);}finally{await worker.stop();d.close();}
+ for(const status of ['completed','partial_failed','failed'])assert.equal(taskPhase({status,summary:JSON.stringify({phase:'finished'})}),null);
+ assert.equal(taskTitle({kind:'maintenance'}),'维护补采（历史）');assert.equal(taskTitle({kind:'configuration'}),'配置触发（历史）');assert.equal(taskTitle({kind:'scheduled',summary:JSON.stringify({trigger:'initial'})}),'首次采集');
 });
 test('第一篇立即分析发布，再获取第二篇；无需预警正文不入库且被清除',async()=>{
  const d=db();const events:string[]=[];const id=createTask(d,'manual',undefined,END);
