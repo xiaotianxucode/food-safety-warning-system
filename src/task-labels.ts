@@ -8,3 +8,6 @@ export function taskPhase(job:{status:string;summary?:string}) {
   if(job.status!=='running'||phase==='finished')return null;
   return ({streaming:'逐篇采集与分析',scanning:'扫描栏目',collecting:'读取正文',analyzing:'模型分析'} as Record<string,string>)[phase]||null;
 }
+export function sourceCollectionMode(source:{mode?:string;start_inclusive?:number}) {
+  return source.mode==='initial'||(!source.mode&&source.start_inclusive===1)?'首次采集（近三天）':'增量采集';
+}

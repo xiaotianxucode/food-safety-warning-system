@@ -42,17 +42,14 @@ export function createTask(db:DB,kind:string,ids?:number[],end=now(),withinTrans
       }
     } else {
       const cfg=JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value);
-      const starts:string[]=[];
       for(const url of cfg.sources) {
         const state=one(db,'SELECT * FROM source_states WHERE url=?',url);
-        const start=state?.last_end||state?.initial_start||weekBefore(end);starts.push(start);
+        const start=state?.last_end||state?.initial_start||weekBefore(end);
+        const mode=state?.last_attempt_end||state?.last_end?'incremental':'initial';
         run(db,'INSERT OR IGNORE INTO source_states(url,next_run_at,initial_start) VALUES(?,?,?)',url,end,start);
-        run(db,'INSERT INTO job_sources(job_id,url,name,window_start,window_end,start_inclusive) VALUES(?,?,?,?,?,?)',id,url,sourceName(url),start,end,state?.last_end?0:1);
+        run(db,'INSERT INTO job_sources(job_id,url,name,window_start,window_end,start_inclusive,mode) VALUES(?,?,?,?,?,?,?)',id,url,sourceName(url),start,end,state?.last_end?0:1,mode);
         run(db,'INSERT INTO task_pages(job_id,url,source_url) VALUES(?,?,?)',id,url,url);
       }
-      summary.windowStart=starts.sort()[0];summary.windowEnd=end;summary.startInclusive=all(db,'SELECT * FROM job_sources WHERE job_id=? AND start_inclusive=0',id).length===0;
-      summary.mode=summary.startInclusive?'initial':'incremental';
-      run(db,'UPDATE jobs SET summary=? WHERE id=?',JSON.stringify(summary),id);
       saveCrawlState(db,{...crawlState(db),scheduleVersion:2,lastRunAt:end,nextRunAt:new Date(Date.parse(end)+DAY).toISOString()});
     }
     return id;
@@ -78,8 +75,8 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
     if(item.status==='failed'&&one(db,'SELECT model_status FROM task_items WHERE id=?',item.id)!.model_status==='pending')continue;
     run(db,'UPDATE task_items SET model_status=?,news_id=?,analysis_id=(SELECT id FROM analyses WHERE news_id=? ORDER BY id DESC LIMIT 1),error=(SELECT error FROM pipeline_items WHERE id=(SELECT staging_id FROM task_items WHERE id=?)) WHERE id=?',item.status,item.news_id,item.news_id,item.id,item.id);
   }
-  run(db,"UPDATE pipeline_items SET status='pending' WHERE status='running' AND id IN (SELECT staging_id FROM task_items WHERE job_id=?)",id);
-  run(db,"UPDATE task_items SET model_status='pending' WHERE job_id=? AND model_status='running'",id);
+  run(db,"UPDATE pipeline_items SET status='failed',error='服务中断，模型调用结果未确认，请手动重试',updated_at=? WHERE status IN ('running','pending') AND id IN (SELECT staging_id FROM task_items WHERE job_id=? AND model_status='running')",now(),id);
+  run(db,"UPDATE task_items SET model_status='failed',error='服务中断，模型调用结果未确认，请手动重试' WHERE job_id=? AND model_status='running'",id);
   const analyze=async(itemId:number,stageId:number)=>{
     checkStop();
     run(db,"UPDATE task_items SET model_status='running' WHERE id=?",itemId);taskProgress(db,id);
@@ -94,17 +91,15 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
     if(item.result==='pending') {
       try {
         let article;
-        for(let a=1;a<=3;a++){
-          try{
+          {
             const html=await hooks.fetcher(item.url);
             const publication=extractPublication(html,item.url);
             if(publication.publishedAt){
               const inside=publication.datePrecise?windowContains(source.window_start,source.window_end,publication.publishedAt,!!source.start_inclusive):Date.parse(publication.publishedAt)+DAY>Date.parse(source.window_start)&&publication.publishedAt<=source.window_end;
               if(!inside){run(db,"UPDATE task_items SET result='outside',published_at=?,error=NULL WHERE id=?",publication.publishedAt,item.id);return;}
             }
-            article=extractArticle(html,item.url);break;
-          }catch(e){if(a===3)throw e;await hooks.pause();}
-        }
+            article=extractArticle(html,item.url);
+          }
         if(!article)throw new Error('正文缺失');
         if(!article.publishedAt){run(db,"UPDATE task_items SET result='date_unknown',title=?,error='发布时间无法确认，未投入分析' WHERE id=?",article.title,item.id);return;}
         const inside=article.datePrecise?windowContains(source.window_start,source.window_end,article.publishedAt,!!source.start_inclusive):Date.parse(article.publishedAt)+DAY>Date.parse(source.window_start)&&article.publishedAt<=source.window_end;
@@ -122,13 +117,13 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
   };
   for(const source of all(db,"SELECT * FROM job_sources WHERE job_id=? AND status<>'completed' ORDER BY rowid",id)) {
     checkStop();
-    run(db,"UPDATE job_sources SET status='running',error=NULL WHERE job_id=? AND url=?",id,source.url);
+    run(db,"UPDATE job_sources SET status='running',error=NULL,started_at=COALESCE(started_at,?),finished_at=NULL WHERE job_id=? AND url=?",now(),id,source.url);
     for(const item of all(db,"SELECT * FROM task_items WHERE job_id=? AND source_name=? AND result='pending' ORDER BY id",id,source.name))await read(item,source);
     let page:any;
     while((page=one(db,"SELECT * FROM task_pages WHERE job_id=? AND source_url=? AND status='pending' ORDER BY rowid LIMIT 1",id,source.url))) {
       checkStop();
       try {
-        let html='';for(let a=1;a<=3;a++){try{html=await hooks.fetcher(page.url);break;}catch(e){if(a===3)throw e;await hooks.pause();}}
+        const html=await hooks.fetcher(page.url);
         const listing=extractListing(html,page.url);
         if(!listing.entries.length&&!listing.seeds.length&&!/暂无|没有找到|无相关|no results/i.test(html))throw new Error('未识别有效新闻列表，不能确认覆盖完整');
         const before=listing.ordered&&listing.entries.length>0&&listing.entries.every(e=>e.publishedAt&&Date.parse(e.publishedAt)+(e.precise?0:DAY)<Date.parse(source.window_start));
@@ -149,8 +144,9 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
     }
     const errors=[...all(db,"SELECT error FROM task_pages WHERE job_id=? AND source_url=? AND status='failed'",id,source.url),...all(db,"SELECT error FROM task_items WHERE job_id=? AND source_name=? AND result IN ('read_failed','date_unknown')",id,source.name)];
     transaction(db,()=>{
-      run(db,'UPDATE job_sources SET status=?,error=? WHERE job_id=? AND url=?',errors.length?'failed':'completed',errors.map(e=>e.error).join('\n')||null,id,source.url);
+      run(db,'UPDATE job_sources SET status=?,error=?,finished_at=? WHERE job_id=? AND url=?',errors.length?'failed':'completed',errors.map(e=>e.error).join('\n')||null,now(),id,source.url);
       run(db,'INSERT INTO source_states(url,last_end,next_run_at) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET last_end=COALESCE(excluded.last_end,last_end),next_run_at=excluded.next_run_at',source.url,errors.length?null:source.window_end,new Date(Date.parse(source.window_end)+DAY).toISOString());
+      run(db,'UPDATE source_states SET last_attempt_end=? WHERE url=?',source.window_end,source.url);
     });
   }
   const sources=all(db,'SELECT * FROM job_sources WHERE job_id=?',id);

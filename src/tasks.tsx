@@ -1,6 +1,6 @@
 import { FailurePanel } from './failures';
 import { failureTotals, failureLabel, collectionCounts } from './failure-status';
-import { taskTitle, taskPhase } from './task-labels';
+import { taskTitle, taskPhase, sourceCollectionMode } from './task-labels';
 import React, { useCallback, useEffect, useState } from 'react';
 type Props = {
   overview: any;
@@ -92,12 +92,6 @@ export function TaskSummary({ job }: { job: any }) {
         发布结果：新闻入库 {s.warningArticles || 0} 篇 · 发布预警 {s.publishedAlerts || 0} 条（一篇可产生多个对象预警）
       </p>
       {!!s.readingPending && <small>另有 {s.readingPending} 个链接待读取正文；链接数不代表新增或入库篇数。</small>}
-      {s.windowStart && job.kind !== 'model_retry' && (
-        <small>
-          {job.kind==='maintenance'?'维护补采窗口':job.kind==='configuration'?'新增来源首次窗口（历史）':s.mode === 'initial' ? (s.initialDays === 3 ? '首次近三天' : '首次采集') : '增量窗口'}：
-          {full(s.windowStart)} {s.startInclusive ? '≤' : '＜'} 新闻发布时间 ≤ {full(s.windowEnd)}
-        </small>
-      )}
       {s.triggerNote&&<small>触发说明：{s.triggerNote}</small>}
     </div>
   );
@@ -142,12 +136,10 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
         <div className="task-schedule">
           <p>自动采集：每 24 小时 · 下次计划：{full(state?.nextRunAt)}</p>
           <p>
-            {state?.initialized
-              ? '上次成功采集截止：' + full(state.lastSuccessEnd)
-              : '尚未完成所有来源的首次近三天采集；各来源独立补齐失败窗口。'}
+            各网站的首次／增量采集标记及时间范围，请在“任务详情”中查看。
           </p>
           <p>
-            模型分析失败的文章请在下方暂存区逐篇重试，使用已保存正文。
+            每轮只执行一次，不自动重试模型或创建补采任务。模型分析失败请在下方暂存区逐篇手动重试。
           </p>
         </div>
         {active && (
@@ -216,7 +208,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
               }}
             >
               <option value="">全部任务</option>
-              {['manual', 'scheduled', 'model_retry', 'maintenance', 'configuration'].map((k) => (
+              {['manual', 'scheduled', 'model_retry'].map((k) => (
                 <option key={k} value={k}>
                   {names[k]}
                 </option>
@@ -359,7 +351,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                 {full(data.job.started_at)}
               </p>
               <TaskSummary job={data.job} />
-              {data.sourceProgress?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> · {s.status==='failed'?<span className="tag danger">采集失败</span>:<Status name={s.status}/>}<small>{full(s.window_start)} — {full(s.window_end)}</small><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>{s.error&&<details><summary>查看失败原因</summary><p className="error">{s.error}</p></details>}</div>)}
+              {data.sourceProgress?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> · <span className="tag neutral">{sourceCollectionMode(s)}</span> · {s.status==='failed'?<span className="tag danger">采集失败</span>:<Status name={s.status}/>}<small>采集范围：{full(s.window_start)} {s.start_inclusive?'≤':'＜'} 新闻发布时间 ≤ {full(s.window_end)}</small><small>本网站运行：{s.started_at?`开始 ${full(s.started_at)} · 结束 ${full(s.finished_at)}`:'等待执行'}</small><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>{s.error&&<details><summary>查看失败原因</summary><p className="error">{s.error}</p></details>}</div>)}
               <div className="task-filters">
                 <label>
                   记录范围

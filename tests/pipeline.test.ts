@@ -9,7 +9,7 @@ import {extractListing,extractArticle,canonicalUrl} from '../server/crawler.js';
 import {createApp} from '../server/app.js';
 import {failureCounts} from '../server/failure-counts.js';
 import {failureTotals,failureLabel,collectionCounts} from '../src/failure-status.js';
-import {taskTitle,taskPhase} from '../src/task-labels.js';
+import {taskTitle,taskPhase,sourceCollectionMode} from '../src/task-labels.js';
 import {hashPassword} from '../server/auth.js';
 import * as XLSX from 'xlsx';
 const END='2026-11-04T12:00:00.000Z';
@@ -118,7 +118,7 @@ test('URL及跨站正文指纹去重；不重复调用模型；需预警重复�
 });
 test('失败不入新闻库，暂存正文并支持单篇重试',async()=>{
  const d=db();const id=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',one(d,'SELECT MAX(id) id FROM prompts')!.id).id;
- await analyzeStaged(d,id,async()=>{throw new Error('timeout');});assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,0);assert.equal(one(d,'SELECT attempts FROM pipeline_items WHERE id=?',id)!.attempts,3);
+ await analyzeStaged(d,id,async()=>{throw new Error('timeout');});assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,0);assert.equal(one(d,'SELECT attempts FROM pipeline_items WHERE id=?',id)!.attempts,1);
  assert.ok(one(d,'SELECT body FROM pipeline_items WHERE id=?',id)!.body);
  const worker=new Worker(d,async()=>'',async()=>warning as any);assert.ok(worker.launch('retry',id));await worker.stop();assert.equal(one(d,'SELECT status FROM pipeline_items WHERE id=?',id)!.status,'warning');d.close();
 });
@@ -141,11 +141,27 @@ test('窗口外旧图文页先按发布元数据排除，不因没有正文误�
  await execute(d,id,async(url:string)=>url.includes('t20250408_')?'<meta name="PubDate" content="2025-04-08 12:00"><meta name="ArticleTitle" content="旧科普图文"><img src="old.png">':'<a href="https://scjgj.cq.gov.cn/zt_225/spaqzb/ggfw/202504/t20250408_1.html">一图读懂保健食品</a>',async()=>{throw new Error('窗口外不得调用模型');});
  const s=taskProgress(d,id);assert.equal(s.outside,1);assert.equal(s.readFailed,0);assert.equal(one(d,'SELECT status FROM jobs WHERE id=?',id)!.status,'completed');assert.equal(one(d,'SELECT last_end FROM source_states WHERE url=?',root)!.last_end,END);d.close();
 });
-test('重启恢复已抓取暂存文章，无需重新获取正文',async()=>{
+test('中断的模型调用不会自动重复，保留正文并标为模型失败等待手动重试',async()=>{
  const d=db();const job=createTask(d,'manual',undefined,END);const p=one(d,'SELECT MAX(id) id FROM prompts')!.id;
  const item=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',p);run(d,"INSERT INTO task_items(job_id,url,staging_id,result,model_status,source_name) VALUES(?,?,?,'new','running','食品伙伴网')",job,'https://news.foodmate.net/2026/11/1.html',item.id);
  run(d,"UPDATE pipeline_items SET status='running' WHERE id=?",item.id);run(d,"UPDATE task_pages SET status='completed' WHERE job_id=?",job);
- await execute(d,job,async()=>{throw new Error('不应重新读取');},async()=>warning);assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,1);assert.equal(one(d,'SELECT status FROM jobs WHERE id=?',job)!.status,'completed');d.close();
+ let calls=0;await execute(d,job,async()=>{throw new Error('不应重新读取');},async()=>{calls++;return warning;});assert.equal(calls,0);assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,0);assert.equal(one(d,'SELECT status FROM jobs WHERE id=?',job)!.status,'partial_failed');assert.equal(one(d,'SELECT status FROM pipeline_items WHERE id=?',item.id)!.status,'failed');assert.ok(one(d,'SELECT body FROM pipeline_items WHERE id=?',item.id)!.body);d.close();
+});
+test('每篇模型只调用一次，后续自动任务不会重试失败文章，人工重试才再次调用',async()=>{
+ const d=db();let calls=0;const fetcher=async(url:string)=>url===ROOT?list([1]):html();const analyzer=async()=>{calls++;throw new Error('固定超时');};
+ const first=createTask(d,'scheduled',undefined,END);await execute(d,first,fetcher,analyzer);assert.equal(calls,1);assert.equal(taskProgress(d,first).modelFailed,1);
+ const next=createTask(d,'scheduled',undefined,new Date(Date.parse(END)+DAY).toISOString());await execute(d,next,fetcher,analyzer);assert.equal(calls,1);assert.equal(one(d,"SELECT COUNT(*) n FROM pipeline_items WHERE status='failed'")!.n,1);
+ const failed=one(d,"SELECT id FROM pipeline_items WHERE status='failed'")!;const worker=new Worker(d,fetcher,async()=>{calls++;return warning as any;});assert.ok(worker.launch('retry',failed.id));await idle(worker);await worker.stop();assert.equal(calls,2);assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,1);d.close();
+});
+test('采集请求失败只调用一次，不重复请求或另建维护任务',async()=>{
+ const d=db();let requests=0;const first=createTask(d,'scheduled',undefined,END);await execute(d,first,async()=>{requests++;throw new Error('offline');},async()=>noWarning);assert.equal(requests,1);assert.equal(one(d,'SELECT COUNT(*) n FROM jobs')!.n,1);assert.equal(one(d,'SELECT status FROM jobs')!.status,'partial_failed');d.close();
+});
+test('不同来源独立记录首次和增量窗口，不保存误导性的统一时间段',async()=>{
+ const d=db();const first=createTask(d,'manual',undefined,END);await execute(d,first,async()=>'<div>暂无新闻</div>',async()=>noWarning);
+ const other='https://www.cfsn.cn/news/2037.html';setSetting(d,'crawler',{intervalHours:24,sources:[ROOT,other]});const end=new Date(Date.parse(END)+DAY).toISOString();const next=createTask(d,'scheduled',undefined,end);
+ const old=one(d,'SELECT * FROM job_sources WHERE job_id=? AND url=?',next,ROOT)!;const added=one(d,'SELECT * FROM job_sources WHERE job_id=? AND url=?',next,other)!;
+ assert.equal(old.mode,'incremental');assert.equal(old.window_start,END);assert.equal(old.start_inclusive,0);assert.equal(added.mode,'initial');assert.equal(added.window_start,new Date(Date.parse(end)-3*DAY).toISOString());assert.equal(added.start_inclusive,1);
+ assert.equal(sourceCollectionMode(old),'增量采集');assert.equal(sourceCollectionMode(added),'首次采集（近三天）');const summary=JSON.parse(one(d,'SELECT summary FROM jobs WHERE id=?',next)!.summary);assert.equal(summary.windowStart,undefined);assert.equal(summary.windowEnd,undefined);d.close();
 });
 test('发布事务提交后、任务日志更新前崩溃，不会重复分析或卡住',async()=>{
  const d=db();const job=createTask(d,'manual',undefined,END);const p=one(d,'SELECT MAX(id) id FROM prompts')!.id;const item=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',p);

@@ -28,6 +28,10 @@ export function pipelineSchema(db: DB) {
   add('news','categories',"TEXT NOT NULL DEFAULT '[]'");
   add('sources','source_name',"TEXT NOT NULL DEFAULT ''");
   add('source_states','initial_start','TEXT');
+  add('source_states','last_attempt_end','TEXT');
+  add('job_sources','mode',"TEXT NOT NULL DEFAULT 'initial'");
+  add('job_sources','started_at','TEXT');
+  add('job_sources','finished_at','TEXT');
   add('pipeline_items','attachments',"TEXT NOT NULL DEFAULT '[]'");
 }
 
@@ -65,7 +69,6 @@ export async function analyzeStaged(db:DB,id:number,analyzer=callModel) {
   const prompt = one(db,'SELECT * FROM prompts WHERE id=?',item.prompt_id)!;
   run(db,"UPDATE pipeline_items SET status='running',error=NULL,model=?,updated_at=? WHERE id=?",modelName(),now(),id);
   let error='';
-  for (let attempt=1;attempt<=3;attempt++) {
     run(db,'UPDATE pipeline_items SET attempts=attempts+1 WHERE id=?',id);
     try {
       const result = validateAnalysis(await analyzer(prompt.content,item.body),item.body);
@@ -92,8 +95,7 @@ export async function analyzeStaged(db:DB,id:number,analyzer=callModel) {
         run(db,"UPDATE pipeline_items SET status='warning',news_id=?,body='',error=NULL,updated_at=? WHERE id=?",newsId,now(),id);
         return {status:'warning',newsId,analysisId};
       });
-    } catch(e) { error=e instanceof Error?e.message:'模型分析失败'; if (attempt<3) await pause(analyzer===callModel?attempt*1500:0); }
-  }
+    } catch(e) { error=e instanceof Error?e.message:'模型分析失败'; }
   run(db,"UPDATE pipeline_items SET status='failed',error=?,updated_at=? WHERE id=?",error,now(),id);
   return {status:'failed',newsId:item.news_id || null,analysisId:null};
 }

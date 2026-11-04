@@ -33,6 +33,11 @@ export function initialize(db:DB){
     refreshSchedule(db);
     run(db,'INSERT INTO migrations VALUES(7,?)',now());
   });
+  if(!one(db,'SELECT version FROM migrations WHERE version=8'))transaction(db,()=>{
+    run(db,"UPDATE job_sources SET mode=CASE WHEN EXISTS(SELECT 1 FROM job_sources earlier WHERE earlier.url=job_sources.url AND earlier.job_id<job_sources.job_id) THEN 'incremental' ELSE 'initial' END");
+    run(db,"UPDATE source_states SET last_attempt_end=(SELECT MAX(window_end) FROM job_sources WHERE url=source_states.url AND status IN ('completed','failed'))");
+    run(db,'INSERT INTO migrations VALUES(8,?)',now());
+  });
 }
 export class Worker {
   busy=false; jobId?:number;
