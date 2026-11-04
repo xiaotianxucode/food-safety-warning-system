@@ -7,6 +7,8 @@ import {stageArticle,analyzeStaged,attachmentText} from '../server/pipeline.js';
 import {validateAnalysis} from '../server/model.js';
 import {extractListing,extractArticle,canonicalUrl} from '../server/crawler.js';
 import {createApp} from '../server/app.js';
+import {failureCounts} from '../server/failure-counts.js';
+import {failureTotals,failureLabel} from '../src/failure-status.js';
 import {hashPassword} from '../server/auth.js';
 import * as XLSX from 'xlsx';
 const END='2026-11-04T12:00:00.000Z';
@@ -20,6 +22,24 @@ const list=(ids:number[])=>ids.map(id=>`<li class="catlist_li"><span>2026-11-04 
 function db(){const d=openDatabase(':memory:');initialize(d);setSetting(d,'crawler',{intervalHours:24,sources:[ROOT]});return d;}
 const execute=(d:any,id:number,fetcher:any,analyzer:any)=>executeTask(d,id,{fetcher,analyzer,enrich:async a=>a,pause:async()=>{}});
 
+test('失败提示只分采集与模型分析两类，旧记录细项合并且保留正确单位',()=>{
+ assert.deepEqual(failureTotals({pageFailed:2,readFailed:3,dateUnknown:1,modelFailed:4}),{collection:6,analysis:4});
+ assert.deepEqual(failureTotals({collectionFailed:5,pageFailed:2,modelFailed:1}),{collection:5,analysis:1});
+ for(const status of ['read_failed','date_unknown','crawl_failed'])assert.equal(failureLabel(status),'采集失败');
+ assert.equal(failureLabel('failed'),'模型分析失败');assert.equal(failureLabel('pending'),undefined);
+});
+test('当前采集失败合并页面与文章问题，恢复后不重复累计旧失败记录',()=>{
+ const d=db();const job=createTask(d,'manual',undefined,END);
+ run(d,"UPDATE task_pages SET status='failed' WHERE job_id=?",job);
+ run(d,"INSERT INTO task_items(job_id,url,result) VALUES(?,?,'read_failed')",job,ROOT+'a');
+ run(d,"INSERT INTO task_items(job_id,url,result) VALUES(?,?,'date_unknown')",job,ROOT+'b');
+ assert.equal(failureCounts(d).collection,3);
+ assert.equal(taskProgress(d,job).collectionFailed,3);
+ const next=createTask(d,'manual',undefined,END);
+ run(d,"UPDATE task_pages SET status='completed' WHERE job_id=?",next);
+ for(const suffix of ['a','b'])run(d,"INSERT INTO task_items(job_id,url,result) VALUES(?,?,'outside')",next,ROOT+suffix);
+ assert.deepEqual(failureCounts(d),{collection:0,analysis:0});d.close();
+});
 test('首次72小时；断网超过24h后补齐原窗口；失败源保留初始边界',async()=>{
  const d=db();let id=createTask(d,'manual',undefined,END);
  const initial=one(d,'SELECT * FROM job_sources WHERE job_id=?',id)!;assert.equal(Date.parse(END)-Date.parse(initial.window_start),3*DAY);

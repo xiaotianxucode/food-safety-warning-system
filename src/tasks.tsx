@@ -1,4 +1,5 @@
 import { FailurePanel } from './failures';
+import { failureTotals, failureLabel } from './failure-status';
 import React, { useCallback, useEffect, useState } from 'react';
 type Props = {
   overview: any;
@@ -10,7 +11,7 @@ const names: Record<string, string> = {
   manual: '手动采集',
   scheduled: '自动采集',
   model_retry: '暂存区单篇重试',
-  crawl_retry: '新闻正文读取失败重试',
+  crawl_retry: '采集失败重试',
   retry: '旧版单篇重试',
   running: '执行中',
   completed: '已完成',
@@ -21,8 +22,8 @@ const names: Record<string, string> = {
   new: '新增待判定',
   duplicate: '去重合并',
   outside: '时间范围外',
-  date_unknown: '发布时间无法确认',
-  read_failed: '新闻正文读取失败',
+  date_unknown: '采集失败',
+  read_failed: '采集失败',
   warning: '需要预警',
   no_warning: '无需预警',
   none: '未投入分析',
@@ -53,6 +54,7 @@ function Status({ name }: { name: string }) {
 }
 export function TaskSummary({ job }: { job: any }) {
   const s = JSON.parse(job.summary || '{}');
+  const failures = failureTotals(s);
   if (s.version !== 2 && s.version !== 3)
     return (
       <div className="task-summary legacy">
@@ -74,14 +76,13 @@ export function TaskSummary({ job }: { job: any }) {
             <b>
               采集 {s.collected || 0} − 去重 {s.deduplicated || 0} = 新增待判定 {s.added || 0} 篇
             </b>
-            {' '}· 新闻列表读取失败 {s.pageFailed || 0} 页 · 新闻正文读取失败{' '}
-            {s.readFailed || 0} 篇 · 发布时间无法确认 {s.dateUnknown || 0} 篇
+            {' '}· 采集失败 {failures.collection} 处
           </>
         )}
       </p>
       <p>
         模型分析：需预警 {s.warningArticles || 0} 篇 · 无需预警已舍弃 {s.noWarning || 0} 篇 ·
-        模型失败 {s.modelFailed || 0} 篇 · 待处理／处理中 {s.modelPending || 0} 篇
+        模型分析失败 {failures.analysis} 篇 · 待处理／处理中 {s.modelPending || 0} 篇
       </p>
       <p>
         发布结果：新闻入库 {s.warningArticles || 0} 篇 · 发布预警 {s.publishedAlerts || 0} 条（一篇可产生多个对象预警）
@@ -141,7 +142,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
               : '尚未完成所有来源的首次近三天采集；各来源独立补齐失败窗口。'}
           </p>
           <p>
-            模型失败文章请在下方“模型失败暂存区”逐篇重试，使用已保存正文。
+            模型分析失败的文章请在下方暂存区逐篇重试，使用已保存正文。
           </p>
         </div>
         {active && (
@@ -175,7 +176,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
         </div>
         <div className="metric">
           <div>
-            <label>模型待重试</label>
+            <label>模型分析失败</label>
             <strong>
               {overview?.modelFailed ?? '—'}
               <small>篇</small>
@@ -184,10 +185,10 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
         </div>
         <div className="metric">
           <div>
-            <label>正文待重试</label>
+            <label>采集失败</label>
             <strong>
               {overview?.crawlFailed ?? '—'}
-              <small>篇</small>
+              <small>处</small>
             </strong>
           </div>
         </div>
@@ -266,7 +267,7 @@ export function TaskCenter({ overview, busy, onCollect }: Props) {
                   </td>
                   <td>
                     <TaskSummary job={j} />
-                    {j.error && <pre className="inline-error">{j.error}</pre>}
+                    {j.error && <details><summary>查看失败原因</summary><pre className="inline-error">{j.error}</pre></details>}
                   </td>
                   <td>
                     <button className="text-button" onClick={() => setSelected(j.id)}>
@@ -355,7 +356,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                 {full(data.job.started_at)}
               </p>
               <TaskSummary job={data.job} />
-              {data.sourceProgress?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> · <Status name={s.status}/><small>{full(s.window_start)} — {full(s.window_end)}</small><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>{s.error&&<p className="error">{s.error}</p>}</div>)}
+              {data.sourceProgress?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> · {s.status==='failed'?<span className="tag danger">采集失败</span>:<Status name={s.status}/>}<small>{full(s.window_start)} — {full(s.window_end)}</small><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>{s.error&&<details><summary>查看失败原因</summary><p className="error">{s.error}</p></details>}</div>)}
               <div className="task-filters">
                 <label>
                   记录范围
@@ -377,15 +378,11 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                 以下为明细展示分页，不代表待处理数量。
                 {scope === 'outside'
                   ? '窗口外链接不会投入本次模型分析。'
-                  : '本次范围包含采集、分析失败及发布时间无法确认的记录；实际剩余量见上方“待处理／处理中”。'}
+                  : '本次范围包含采集失败和模型分析失败记录；实际剩余量见上方“待处理／处理中”。'}
               </p>
-              {data.job.error && <pre className="inline-error">{data.job.error}</pre>}
+              {data.job.error && <details><summary>查看失败原因</summary><pre className="inline-error">{data.job.error}</pre></details>}
               {data.pageErrors.map((p: any) => (
-                <p key={p.url} className="error">
-                  栏目：{p.url}
-                  <br />
-                  {p.error}
-                </p>
+                <details key={p.url} className="error"><summary>采集失败 · {p.url}</summary><p>{p.error}</p></details>
               ))}
               <div className="table-scroll">
                 <table>
@@ -413,9 +410,9 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                             </a>
                           )}
                         </td>
-                        <td>{names[i.result] || i.result}</td>
-                        <td>{names[i.model_status] || i.model_status}</td>
-                        <td>{i.error || '—'}</td>
+                        <td>{failureLabel(i.result) || names[i.result] || i.result}</td>
+                        <td>{failureLabel(i.model_status) || names[i.model_status] || i.model_status}</td>
+                        <td>{i.error ? <details><summary>查看失败原因</summary>{i.error}</details> : '—'}</td>
                       </tr>
                     ))}
                   </tbody>

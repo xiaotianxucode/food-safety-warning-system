@@ -81,7 +81,7 @@ const statusNames: Record<string, string> = {
   filtered: '已筛除',
   duplicate: '重复报道',
   crawl_failed: '采集失败',
-  analysis_failed: '分析失败',
+  analysis_failed: '模型分析失败',
   running: '执行中',
   completed: '已完成',
   partial_failed: '部分失败',
@@ -91,14 +91,14 @@ const statusNames: Record<string, string> = {
   manual: '手动采集',
   retry: '失败重试',
   model_retry: '模型失败重试',
-  crawl_retry: '新闻正文读取失败重试',
+  crawl_retry: '采集失败重试',
   scanning: '扫描栏目',
   collecting: '读取正文',
   finished: '已完成',
   new: '新增入库',
   outside: '时间范围外',
-  date_unknown: '发布时间无法确认',
-  read_failed: '新闻正文读取失败',
+  date_unknown: '采集失败',
+  read_failed: '采集失败',
   warning: '需要预警',
   none: '未投入分析',
 };
@@ -658,7 +658,7 @@ function DashboardFeed({
         )}
         {data.lastJob && ['partial_failed', 'failed'].includes(data.lastJob.status) && (
           <div className="notice">
-            <AlertTriangle size={16} /> 最近采集存在失败，当前展示已保存内容，开发者可在后台查看。
+            <AlertTriangle size={16} /> 最近任务存在失败，当前展示已保存内容，开发者可在后台查看详情。
           </div>
         )}
         <div
@@ -1070,7 +1070,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               自动采集周期：24
               小时。首次覆盖近三天（72小时），后续从上次成功采集截止时刻到本次触发时刻；按窗口自动翻页，不设篇数上限。
             </p>
-            <div className="source-status-list">{settings.sourceStatus?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> <label className="source-toggle"><input type="checkbox" checked={settings.crawler.sources.includes(s.url)} onChange={e=>setSettings({...settings,crawler:{...settings.crawler,sources:e.target.checked?[...settings.crawler.sources,s.url]:settings.crawler.sources.filter((u:string)=>u!==s.url)}})}/>启用</label><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a><small>上次成功覆盖截止：{fmt(s.last_end)} · 最近结果：{statusNames[s.latest?.status] || s.latest?.status || '尚未采集'}</small>{s.latest?.error&&<p className="error">{s.latest.error}</p>}</div>)}</div>
+            <div className="source-status-list">{settings.sourceStatus?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> <label className="source-toggle"><input type="checkbox" checked={settings.crawler.sources.includes(s.url)} onChange={e=>setSettings({...settings,crawler:{...settings.crawler,sources:e.target.checked?[...settings.crawler.sources,s.url]:settings.crawler.sources.filter((u:string)=>u!==s.url)}})}/>启用</label><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a><small>上次成功覆盖截止：{fmt(s.last_end)} · 最近结果：{s.latest?.status==='failed'?'采集失败':statusNames[s.latest?.status] || s.latest?.status || '尚未采集'}</small>{s.latest?.error&&<details><summary>查看失败原因</summary><p className="error">{s.latest.error}</p></details>}</div>)}</div>
             <label>
               启用的来源栏目（每行一个受支持网站链接；移除即停用）
               <textarea

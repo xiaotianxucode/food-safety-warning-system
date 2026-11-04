@@ -10,6 +10,7 @@ import { canonicalUrl } from './crawler.js';
 import { callModel, modelName } from './model.js';
 import { SOURCE_DEFINITIONS, sourceName } from './source-registry.js';
 import { crawlState, saveCrawlState } from './collection.js';
+import { failureCounts } from './failure-counts.js';
 declare global {
   namespace Express {
     interface Request {
@@ -242,26 +243,23 @@ export function createApp(db: DB, worker = new Worker(db)) {
   app.use('/api/admin', (req, res, next) =>
     req.user!.role === 'developer' ? next() : res.status(403).json({ error: '仅开发者可访问' }),
   );
-  app.get('/api/admin/overview', (_req, res) =>
+  app.get('/api/admin/overview', (_req, res) => {
+    const failures = failureCounts(db);
     res.json({
       news: one(db, 'SELECT COUNT(*) AS count FROM news')!.count,
       alerts: one(db, 'SELECT COUNT(*) AS count FROM alerts WHERE withdrawn=0')!.count,
-      failed: one(
-        db,
-        "SELECT COUNT(*) AS count FROM pipeline_items WHERE status='failed'",
-      )!.count,
+      failed: failures.collection + failures.analysis,
       users: one(db, 'SELECT COUNT(*) AS count FROM users WHERE active=1')!.count,
       busy:
         worker.busy ||
         worker.hasUnfinishedTask() ||
         !!one(db, "SELECT name FROM locks WHERE name='worker' AND expires_at>?", now()),
-      modelFailed: one(db, "SELECT COUNT(*) AS count FROM pipeline_items WHERE status='failed'")!
-        .count,
-      crawlFailed: one(db, "SELECT COUNT(*) AS count FROM task_items i WHERE i.result IN ('read_failed','date_unknown') AND NOT EXISTS(SELECT 1 FROM task_items newer WHERE newer.url=i.url AND newer.id>i.id AND newer.result<>'pending')")!.count,
+      modelFailed: failures.analysis,
+      crawlFailed: failures.collection,
       crawlState: crawlState(db),
       jobs: all(db, 'SELECT * FROM jobs ORDER BY id DESC LIMIT 30'),
-    }),
-  );
+    });
+  });
   app.get('/api/admin/jobs', (req, res) => {
     const page = z.coerce.number().int().min(1).default(1).parse(req.query.page);
     const kind = z.string().max(40).optional().parse(req.query.kind);
