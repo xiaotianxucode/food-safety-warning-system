@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { one, run, transaction, now, type DB } from './db.js';
+import { all, one, run, transaction, now, type DB } from './db.js';
 import { DEFAULT_PROMPT } from './prompt.js';
 import { callModel } from './model.js';
 import { DEFAULT_SOURCES, fetchHtml } from './crawler.js';
-import { createTask, executeTask, crawlState, saveCrawlState } from './collection.js';
+import { createTask, executeTask, taskProgress, crawlState, saveCrawlState } from './collection.js';
 import { pipelineSchema, pause } from './pipeline.js';
 export function setSetting(db:DB,key:string,value:unknown){run(db,'INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value));}
 export const config=(db:DB)=>JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value);
@@ -21,6 +21,13 @@ export function initialize(db:DB){
     saveCrawlState(db,{initialized:false,lastSuccessEnd:null,nextRunAt:now(),initialDays:3});
     run(db,'INSERT INTO prompts(content,created_at) VALUES(?,?)',DEFAULT_PROMPT,now());
     for(const version of [2,3,4,5])run(db,'INSERT OR IGNORE INTO migrations VALUES(?,?)',version,now());
+  });
+  if(!one(db,'SELECT version FROM migrations WHERE version=6'))transaction(db,()=>{
+    for(const job of all(db,'SELECT id,summary FROM jobs')){
+      const version=JSON.parse(job.summary||'{}').version;
+      if(version===2||version===3)taskProgress(db,job.id);
+    }
+    run(db,'INSERT INTO migrations VALUES(6,?)',now());
   });
 }
 export class Worker {

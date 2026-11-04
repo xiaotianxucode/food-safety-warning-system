@@ -1,5 +1,5 @@
 import { FailurePanel } from './failures';
-import { failureTotals, failureLabel } from './failure-status';
+import { failureTotals, failureLabel, collectionCounts } from './failure-status';
 import React, { useCallback, useEffect, useState } from 'react';
 type Props = {
   overview: any;
@@ -55,6 +55,7 @@ function Status({ name }: { name: string }) {
 export function TaskSummary({ job }: { job: any }) {
   const s = JSON.parse(job.summary || '{}');
   const failures = failureTotals(s);
+  const collection = collectionCounts(s);
   if (s.version !== 2 && s.version !== 3)
     return (
       <div className="task-summary legacy">
@@ -74,12 +75,12 @@ export function TaskSummary({ job }: { job: any }) {
         ) : (
           <>
             <b>
-              采集 {s.collected || 0} − 去重 {s.deduplicated || 0} = 新增待判定 {s.added || 0} 篇
+              新增待判定 {collection.added} 篇 = 采集新闻 {collection.collected} 篇 − 采集失败 {collection.failed} 篇 − 去重 {collection.deduplicated} 篇
             </b>
-            {' '}· 采集失败 {failures.collection} 处
           </>
         )}
       </p>
+      {!!s.pageFailed && <small>本次采集未完整完成，新闻计数仅含已识别的新闻；失败原因见详情。</small>}
       <p>
         模型分析：需预警 {s.warningArticles || 0} 篇 · 无需预警已舍弃 {s.noWarning || 0} 篇 ·
         模型分析失败 {failures.analysis} 篇 · 待处理／处理中 {s.modelPending || 0} 篇
