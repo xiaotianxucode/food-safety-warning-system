@@ -11,7 +11,7 @@ const names: Record<string, string> = {
   manual: '手动采集',
   scheduled: '自动采集',
   model_retry: '模型失败重试',
-  crawl_retry: '正文失败重试',
+  crawl_retry: '新闻正文读取失败重试',
   retry: '旧版单篇重试',
   analysis_reset: '模型分析重置',
   running: '执行中',
@@ -23,8 +23,8 @@ const names: Record<string, string> = {
   new: '新增入库',
   duplicate: '去重合并',
   outside: '时间范围外',
-  date_unknown: '时间待确认',
-  read_failed: '正文失败',
+  date_unknown: '发布时间无法确认',
+  read_failed: '新闻正文读取失败',
   warning: '需要预警',
   no_warning: '无需预警',
   none: '未投入分析',
@@ -76,30 +76,25 @@ export function TaskSummary({ job }: { job: any }) {
   return (
     <div className="task-summary">
       <p>
+        采集结果：
         {job.kind === 'model_retry' ? (
-          `模型重试 ${s.discovered} 篇`
+          '使用已保存正文，无需重新采集'
         ) : (
           <>
             <b>
               采集 {s.collected || 0} − 去重 {s.deduplicated || 0} = 新增 {s.added || 0} 篇
             </b>
+            {' '}· 新闻列表读取失败 {s.pageFailed || 0} 页 · 新闻正文读取失败{' '}
+            {s.readFailed || 0} 篇 · 发布时间无法确认 {s.dateUnknown || 0} 篇
           </>
         )}
       </p>
       <p>
-        {job.kind === 'model_retry' ? '重试结果' : '新增新闻'}：需预警 {s.warningArticles || 0} ·
-        无需预警 {s.noWarning || 0} · 模型失败 {s.modelFailed || 0} · 待处理／处理中{' '}
-        {s.modelPending || 0}
+        模型分析：需预警 {s.warningArticles || 0} 篇 · 无需预警 {s.noWarning || 0} 篇 ·
+        模型失败 {s.modelFailed || 0} 篇 · 待处理／处理中 {s.modelPending || 0} 篇
       </p>
       <p>
-        发布预警 {s.publishedAlerts || 0} 条
-        {job.kind !== 'model_retry' && (
-          <>
-            {' '}
-            · 页面失败 {s.pageFailed || 0} · 正文失败 {s.readFailed || 0} · 时间待确认{' '}
-            {s.dateUnknown || 0}
-          </>
-        )}
+        发布结果：发布预警 {s.publishedAlerts || 0} 条
       </p>
       {s.windowStart && job.kind !== 'model_retry' && (
         <small>
@@ -403,7 +398,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                 以下为明细展示分页，不代表待处理数量。
                 {scope === 'outside'
                   ? '窗口外链接不会投入本次模型分析。'
-                  : '本次范围包含采集、分析失败及时间待确认记录；实际剩余量见上方“待处理／处理中”。'}
+                  : '本次范围包含采集、分析失败及发布时间无法确认的记录；实际剩余量见上方“待处理／处理中”。'}
               </p>
               {data.job.error && <pre className="inline-error">{data.job.error}</pre>}
               {data.pageErrors.map((p: any) => (
