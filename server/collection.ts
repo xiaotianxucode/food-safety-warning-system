@@ -1,5 +1,5 @@
 import { all, one, run, transaction, now, type DB } from './db.js';
-import { extractArticle, extractListing, fetchHtml } from './crawler.js';
+import { extractArticle, extractPublication, extractListing, fetchHtml } from './crawler.js';
 import { analyzeStaged, stageArticle, enrichArticle, pause } from './pipeline.js';
 import { callModel } from './model.js';
 import { sourceName } from './source-registry.js';
@@ -74,7 +74,17 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
     if(item.result==='pending') {
       try {
         let article;
-        for(let a=1;a<=3;a++){try{article=extractArticle(await hooks.fetcher(item.url),item.url);break;}catch(e){if(a===3)throw e;await hooks.pause();}}
+        for(let a=1;a<=3;a++){
+          try{
+            const html=await hooks.fetcher(item.url);
+            const publication=extractPublication(html,item.url);
+            if(publication.publishedAt){
+              const inside=publication.datePrecise?windowContains(source.window_start,source.window_end,publication.publishedAt,!!source.start_inclusive):Date.parse(publication.publishedAt)+DAY>Date.parse(source.window_start)&&publication.publishedAt<=source.window_end;
+              if(!inside){run(db,"UPDATE task_items SET result='outside',published_at=?,error=NULL WHERE id=?",publication.publishedAt,item.id);return;}
+            }
+            article=extractArticle(html,item.url);break;
+          }catch(e){if(a===3)throw e;await hooks.pause();}
+        }
         if(!article)throw new Error('正文缺失');
         if(!article.publishedAt){run(db,"UPDATE task_items SET result='date_unknown',title=?,error='发布时间无法确认，未投入分析' WHERE id=?",article.title,item.id);return;}
         const inside=article.datePrecise?windowContains(source.window_start,source.window_end,article.publishedAt,!!source.start_inclusive):Date.parse(article.publishedAt)+DAY>Date.parse(source.window_start)&&article.publishedAt<=source.window_end;

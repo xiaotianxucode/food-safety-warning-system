@@ -71,6 +71,11 @@ test('来源独立成功检查点，正文缺失/时间不明不能误记无预�
  assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,0);const s=taskProgress(d,id);assert.equal(s.readFailed,1);assert.equal(s.dateUnknown,1);assert.equal(s.noWarning,0);assert.equal(sourcesCount(d),2);d.close();
  function sourcesCount(d:any){return one(d,'SELECT COUNT(*) n FROM job_sources WHERE status=\'failed\'')!.n;}
 });
+test('窗口外旧图文页先按发布元数据排除，不因没有正文误报采集失败',async()=>{
+ const d=db();const root='https://scjgj.cq.gov.cn/zt_225/spaqzb/';setSetting(d,'crawler',{intervalHours:24,sources:[root]});const id=createTask(d,'manual',undefined,END);
+ await execute(d,id,async(url:string)=>url.includes('t20250408_')?'<meta name="PubDate" content="2025-04-08 12:00"><meta name="ArticleTitle" content="旧科普图文"><img src="old.png">':'<a href="https://scjgj.cq.gov.cn/zt_225/spaqzb/ggfw/202504/t20250408_1.html">一图读懂保健食品</a>',async()=>{throw new Error('窗口外不得调用模型');});
+ const s=taskProgress(d,id);assert.equal(s.outside,1);assert.equal(s.readFailed,0);assert.equal(one(d,'SELECT status FROM jobs WHERE id=?',id)!.status,'completed');assert.equal(one(d,'SELECT last_end FROM source_states WHERE url=?',root)!.last_end,END);d.close();
+});
 test('重启恢复已抓取暂存文章，无需重新获取正文',async()=>{
  const d=db();const job=createTask(d,'manual',undefined,END);const p=one(d,'SELECT MAX(id) id FROM prompts')!.id;
  const item=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',p);run(d,"INSERT INTO task_items(job_id,url,staging_id,result,model_status,source_name) VALUES(?,?,?,'new','running','食品伙伴网')",job,'https://news.foodmate.net/2026/11/1.html',item.id);

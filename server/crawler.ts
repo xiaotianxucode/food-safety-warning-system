@@ -71,6 +71,20 @@ export function extractLinks(html: string, base: string) {
   });
   return [...links];
 }
+export function extractPublication(html:string,url='https://news.foodmate.net/') {
+  const $=cheerio.load(html);$('script,style,iframe,noscript').remove();
+  const adapter=sourceDefinition(url).adapter;
+  const info=$('h1').parent().clone();info.find('h1').remove();
+  const pageText = adapter==='condiment'?$('.article-meta').text():adapter==='cfsn'?info.text():$('body').text();
+  const metaDate = $('meta[name="PubDate"],meta[name="publishdate"],meta[property="article:published_time"],meta[name="publishDate"]').first().attr('content');
+  const datePattern=/(\d{4})[-年/.](\d{1,2})[-月/.](\d{1,2})日?(?:[T\s]+(\d{2}:\d{2})(?::(\d{2}))?)?/;
+  const labelled=pageText.match(/(?:发布时间|时间|日期)\s*[：:]?\s*(\d{4}[-年/.]\d{1,2}[-月/.]\d{1,2}日?(?:[T\s]+\d{2}:\d{2}(?::\d{2})?)?)/);
+  const raw = (metaDate || labelled?.[1] || (adapter==='foodmate'?'':pageText)).match(datePattern);
+  const publishedAt = raw
+    ? new Date(`${raw[1]}-${raw[2].padStart(2,'0')}-${raw[3].padStart(2,'0')}T${raw[4] || '00:00'}:${raw[5] || '00'}+08:00`).toISOString()
+    : null;
+  return {publishedAt,datePrecise:!!raw?.[4]};
+}
 export function extractArticle(html: string, url = 'https://news.foodmate.net/') {
   const $ = cheerio.load(html);
   $('script,style,iframe,noscript').remove();
@@ -90,15 +104,7 @@ export function extractArticle(html: string, url = 'https://news.foodmate.net/')
     .replace(/[ \t\r]+/g, ' ')
     .replace(/\n\s*\n/g, '\n')
     .trim();
-  const info=$('h1').parent().clone();info.find('h1').remove();
-  const pageText = adapter==='condiment'?$('.article-meta').text():adapter==='cfsn'?info.text():$('body').text();
-  const metaDate = $('meta[name="PubDate"],meta[name="publishdate"],meta[property="article:published_time"],meta[name="publishDate"]').first().attr('content');
-  const datePattern=/(\d{4})[-年/.](\d{1,2})[-月/.](\d{1,2})日?(?:[T\s]+(\d{2}:\d{2})(?::(\d{2}))?)?/;
-  const labelled=pageText.match(/(?:发布时间|时间|日期)\s*[：:]?\s*(\d{4}[-年/.]\d{1,2}[-月/.]\d{1,2}日?(?:[T\s]+\d{2}:\d{2}(?::\d{2})?)?)/);
-  const raw = (metaDate || labelled?.[1] || (adapter==='foodmate'?'':pageText)).match(datePattern);
-  const publishedAt = raw
-    ? new Date(`${raw[1]}-${raw[2].padStart(2,'0')}-${raw[3].padStart(2,'0')}T${raw[4] || '00:00'}:${raw[5] || '00'}+08:00`).toISOString()
-    : null;
+  const {publishedAt,datePrecise}=extractPublication(html,url);
   if (!title || body.length < 30) throw new Error('无法提取新闻标题或正文，需检查来源页面结构');
   const attachments: {url: string; title: string}[] = [];
   const attachmentScope=adapter==='cq'?$('.zwxl-content'):content;
@@ -110,7 +116,7 @@ export function extractArticle(html: string, url = 'https://news.foodmate.net/')
       catch { throw new Error('公告附件链接不在受支持来源范围内，需核查'); }
     }
   });
-  return { title, body, publishedAt, attachments, datePrecise: !!raw?.[4] };
+  return { title, body, publishedAt, attachments, datePrecise };
 }
 
 export function extractListing(html: string, base: string) {

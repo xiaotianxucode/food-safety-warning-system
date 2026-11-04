@@ -257,7 +257,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
         !!one(db, "SELECT name FROM locks WHERE name='worker' AND expires_at>?", now()),
       modelFailed: one(db, "SELECT COUNT(*) AS count FROM pipeline_items WHERE status='failed'")!
         .count,
-      crawlFailed: one(db, "SELECT COUNT(DISTINCT url) AS count FROM task_items WHERE result IN ('read_failed','date_unknown')")!.count,
+      crawlFailed: one(db, "SELECT COUNT(*) AS count FROM task_items i WHERE i.result IN ('read_failed','date_unknown') AND NOT EXISTS(SELECT 1 FROM task_items newer WHERE newer.url=i.url AND newer.id>i.id AND newer.result<>'pending')")!.count,
       crawlState: crawlState(db),
       jobs: all(db, 'SELECT * FROM jobs ORDER BY id DESC LIMIT 30'),
     }),
