@@ -8,7 +8,8 @@ import { hashPassword, verifyPassword, sessionToken, tokenHash } from './auth.js
 import { config, initialize, Worker, setSetting } from './service.js';
 import { canonicalUrl } from './crawler.js';
 import { callModel, modelName } from './model.js';
-import { crawlState } from './collection.js';
+import { SOURCE_DEFINITIONS, sourceName } from './source-registry.js';
+import { crawlState, saveCrawlState } from './collection.js';
 declare global {
   namespace Express {
     interface Request {
@@ -207,7 +208,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
     if (!a) return res.status(404).json({ error: '预警不存在或已撤下' });
     res.json({
       ...serialize(a),
-      sources: all(db, 'SELECT url,title FROM sources WHERE news_id=? ORDER BY id', a.news_id),
+      sources: all(db, 'SELECT url,title,source_name FROM sources WHERE news_id=? ORDER BY id', a.news_id),
     });
   });
   app.post('/api/alerts/:id/read', (req, res) => {
@@ -247,16 +248,16 @@ export function createApp(db: DB, worker = new Worker(db)) {
       alerts: one(db, 'SELECT COUNT(*) AS count FROM alerts WHERE withdrawn=0')!.count,
       failed: one(
         db,
-        "SELECT COUNT(*) AS count FROM news WHERE status IN ('crawl_failed','analysis_failed')",
+        "SELECT COUNT(*) AS count FROM pipeline_items WHERE status='failed'",
       )!.count,
       users: one(db, 'SELECT COUNT(*) AS count FROM users WHERE active=1')!.count,
       busy:
         worker.busy ||
         worker.hasUnfinishedTask() ||
         !!one(db, "SELECT name FROM locks WHERE name='worker' AND expires_at>?", now()),
-      modelFailed: one(db, "SELECT COUNT(*) AS count FROM news WHERE status='analysis_failed'")!
+      modelFailed: one(db, "SELECT COUNT(*) AS count FROM pipeline_items WHERE status='failed'")!
         .count,
-      crawlFailed: one(db, "SELECT COUNT(*) AS count FROM news WHERE status='crawl_failed'")!.count,
+      crawlFailed: one(db, "SELECT COUNT(DISTINCT url) AS count FROM task_items WHERE result IN ('read_failed','date_unknown')")!.count,
       crawlState: crawlState(db),
       jobs: all(db, 'SELECT * FROM jobs ORDER BY id DESC LIMIT 30'),
       latestReset:
@@ -293,7 +294,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
     const job = one(db, 'SELECT * FROM jobs WHERE id=?', parseId(req.params.id));
     if (!job) return res.status(404).json({ error: '任务不存在' });
     const page = z.coerce.number().int().min(1).default(1).parse(req.query.page);
-    const reset = job.kind === 'analysis_reset';
+    const reset = false;
     const scope = z.enum(['window', 'outside', 'all']).default('window').parse(req.query.scope);
     const filter = reset
       ? scope === 'outside'
@@ -326,7 +327,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
           )
         : all(
             db,
-            `SELECT i.*,n.title FROM task_items i LEFT JOIN news n ON n.id=i.news_id WHERE job_id=? ${filter} ORDER BY i.id LIMIT 50 OFFSET ?`,
+            `SELECT i.* FROM task_items i WHERE job_id=? ${filter} ORDER BY i.id LIMIT 50 OFFSET ?`,
             job.id,
             (page - 1) * 50,
           ),
@@ -339,6 +340,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
       totals: { ...totals, window: totals.all - totals.outside },
       scope,
       page,
+      sourceProgress: all(db, 'SELECT * FROM job_sources WHERE job_id=?', job.id),
       pageErrors: all(
         db,
         "SELECT url,error FROM task_pages WHERE job_id=? AND status='failed'",
@@ -346,22 +348,26 @@ export function createApp(db: DB, worker = new Worker(db)) {
       ),
     });
   });
-  app.get('/api/admin/news', (req, res) => {
-    const page = z.coerce.number().int().min(1).default(1).parse(req.query.page);
-    const search = z.string().max(200).default('').parse(req.query.search);
-    res.json({
-      items: all(
-        db,
-        'SELECT n.* FROM news n WHERE title LIKE ? ORDER BY id DESC LIMIT 30 OFFSET ?',
-        `%${search}%`,
-        (page - 1) * 30,
-      ).map((n) => ({
-        ...n,
-        sources: all(db, 'SELECT url,title FROM sources WHERE news_id=?', n.id),
-        analyses: all(db, 'SELECT * FROM analyses WHERE news_id=? ORDER BY id DESC', n.id),
-      })),
-      total: one(db, 'SELECT COUNT(*) AS count FROM news WHERE title LIKE ?', `%${search}%`)!.count,
-    });
+  app.get('/api/admin/news', (req,res)=>{
+    const page=z.coerce.number().int().min(1).default(1).parse(req.query.page);
+    const search=z.string().max(200).default('').parse(req.query.search);
+    const category=z.enum(['biological','chemical','physical','other','']).default('').parse(req.query.category);
+    const source=z.string().max(200).default('').parse(req.query.source);
+    const filters=['n.title LIKE ?'];const args:any[]=[`%${search}%`];
+    if(category){filters.push('EXISTS(SELECT 1 FROM json_each(n.categories) WHERE value=?)');args.push(category);}
+    if(source){filters.push('EXISTS(SELECT 1 FROM sources s WHERE s.news_id=n.id AND s.source_name=?)');args.push(source);}
+    const where=filters.join(' AND ');
+    res.json({items:all(db,`SELECT n.* FROM news n WHERE ${where} ORDER BY id DESC LIMIT 30 OFFSET ?`,...args,(page-1)*30).map(n=>({...n,categories:JSON.parse(n.categories),sources:all(db,'SELECT url,title,source_name FROM sources WHERE news_id=?',n.id),analyses:all(db,'SELECT * FROM analyses WHERE news_id=? ORDER BY id DESC',n.id)})),total:one(db,`SELECT COUNT(*) AS count FROM news n WHERE ${where}`,...args)!.count,sourceOptions:all(db,'SELECT DISTINCT source_name FROM sources ORDER BY source_name').map(s=>s.source_name)});
+  });
+  app.get('/api/admin/failures', (req,res)=>{
+    const page=z.coerce.number().int().min(1).default(1).parse(req.query.page);
+    res.json({items:all(db,"SELECT p.id,p.title,p.published_at,p.error,p.attempts,p.model,p.prompt_id,p.updated_at,(SELECT url FROM pipeline_urls WHERE item_id=p.id LIMIT 1) AS url,(SELECT source_name FROM pipeline_urls WHERE item_id=p.id LIMIT 1) AS source_name FROM pipeline_items p WHERE status='failed' ORDER BY p.id LIMIT 30 OFFSET ?",(page-1)*30),total:one(db,"SELECT COUNT(*) AS count FROM pipeline_items WHERE status='failed'")!.count,page});
+  });
+  app.post('/api/admin/failures/:id/retry',(req,res)=>{
+    const id=parseId(req.params.id);
+    if(!one(db,"SELECT id FROM pipeline_items WHERE id=? AND status='failed' AND trim(body)<>''",id))return res.status(404).json({error:'失败暂存项不存在或没有可重试正文'});
+    if(worker.hasUnfinishedTask()||!worker.launch('retry',id))return res.status(409).json({error:'模型未配置或已有任务执行中'});
+    res.status(202).json({jobId:worker.jobId});
   });
   const parseSince = (value: unknown) => {
     const result = z.iso.datetime({ offset: true }).optional().parse(value);
@@ -388,28 +394,22 @@ export function createApp(db: DB, worker = new Worker(db)) {
     res.status(202).json(result);
   });
   app.post('/api/admin/collect', (_req, res) => {
+    if (!worker.canAnalyze()) return res.status(400).json({error:'请先配置模型 API 密钥，采集后将逐篇立即分析'});
     if (worker.hasUnfinishedTask() || !worker.launch())
       return res.status(409).json({ error: '已有任务执行中或待恢复，请等待完成' });
     res.status(202).json({ jobId: worker.jobId, message: '采集任务已提交' });
   });
   app.post('/api/admin/retry-failed', (_req, res) => {
     if (!worker.canAnalyze()) return res.status(400).json({ error: '请先配置模型 API 密钥' });
-    if (!one(db, "SELECT id FROM news WHERE status='analysis_failed' AND trim(body)<>'' LIMIT 1"))
+    if (!one(db, "SELECT id FROM pipeline_items WHERE status='failed' AND trim(body)<>'' LIMIT 1"))
       return res.status(400).json({ error: '没有可重试的模型失败新闻' });
     if (worker.hasUnfinishedTask() || !worker.launch('model_retry'))
       return res.status(409).json({ error: '已有任务执行中，请等待完成' });
     res.status(202).json({ jobId: worker.jobId });
   });
-  app.post('/api/admin/news/:id/retry', (req, res) => {
-    const id = parseId(req.params.id);
-    const n = one(db, 'SELECT status FROM news WHERE id=?', id);
-    if (!n) return res.status(404).json({ error: '新闻不存在' });
-    if (!['crawl_failed', 'analysis_failed', 'pending'].includes(n.status))
-      return res.status(400).json({ error: '仅失败或待处理新闻可重试' });
-    if (worker.hasUnfinishedTask() || !worker.launch('retry', id))
-      return res.status(409).json({ error: '已有任务正在运行或待恢复' });
-    res.status(202).json({ ok: true });
-  });
+  app.post('/api/admin/news/:id/retry', (_req, res) =>
+    res.status(410).json({ error: '失败重试已移至任务中心暂存区；重新判断已入库新闻请使用模型分析重置。' }),
+  );
   app.get('/api/admin/alerts', (_req, res) =>
     res.json(
       all(
@@ -417,7 +417,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
         'SELECT a.*,n.title FROM alerts a JOIN news n ON n.id=a.news_id ORDER BY id DESC LIMIT 300',
       ).map((a) => ({
         ...serialize(a),
-        sources: all(db, 'SELECT url,title FROM sources WHERE news_id=?', a.news_id),
+        sources: all(db, 'SELECT url,title,source_name FROM sources WHERE news_id=?', a.news_id),
       })),
     ),
   );
@@ -428,6 +428,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
   app.get('/api/admin/config', (_req, res) =>
     res.json({
       crawler: config(db),
+      sourceStatus: [...new Set<string>([...SOURCE_DEFINITIONS.map(s=>s.url),...config(db).sources])].map((url:string)=>({url,name:sourceName(url),enabled:config(db).sources.includes(url),...one(db,'SELECT last_end,next_run_at FROM source_states WHERE url=?',url),latest:one(db,'SELECT * FROM job_sources WHERE url=? ORDER BY job_id DESC LIMIT 1',url)||null})),
       prompt: one(db, 'SELECT * FROM prompts ORDER BY id DESC LIMIT 1'),
       model: {
         name: modelName(),
@@ -453,7 +454,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
                     } catch {
                       return false;
                     }
-                  }, '只允许食品伙伴网链接')
+                  }, '仅支持食品伙伴网、中国食品安全网、中国调味品协会和重庆市场监管局网址')
                   .transform((u) => canonicalUrl(u)),
               )
               .min(1)
@@ -465,8 +466,10 @@ export function createApp(db: DB, worker = new Worker(db)) {
       .refine((v) => v.crawler !== undefined || v.prompt !== undefined, '至少提交采集配置或提示词')
       .parse(req.body);
     transaction(db, () => {
-      if (input.crawler)
-        setSetting(db, 'crawler', { intervalHours: 24, sources: input.crawler.sources });
+      if (input.crawler) {
+        setSetting(db, 'crawler', { intervalHours: 24, sources: [...new Set(input.crawler.sources)] });
+        saveCrawlState(db,{...crawlState(db),nextRunAt:now()});
+      }
       const old = one(db, 'SELECT content FROM prompts ORDER BY id DESC LIMIT 1');
       if (input.prompt !== undefined && old?.content !== input.prompt)
         run(db, 'INSERT INTO prompts(content,created_at) VALUES(?,?)', input.prompt, now());

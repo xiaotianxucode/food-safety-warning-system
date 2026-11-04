@@ -1,3 +1,4 @@
+import { FailurePanel } from './failures';
 import React, { useCallback, useEffect, useState } from 'react';
 type Props = {
   overview: any;
@@ -20,7 +21,7 @@ const names: Record<string, string> = {
   failed: '失败',
   interrupted: '中断待恢复',
   pending: '待处理',
-  new: '新增入库',
+  new: '新增待判定',
   duplicate: '去重合并',
   outside: '时间范围外',
   date_unknown: '发布时间无法确认',
@@ -31,6 +32,7 @@ const names: Record<string, string> = {
   scanning: '扫描栏目',
   collecting: '读取正文',
   analyzing: '模型分析',
+  streaming: '逐篇采集与分析',
   finished: '完成',
 };
 const full = (s?: string) =>
@@ -58,12 +60,12 @@ export function TaskSummary({ job }: { job: any }) {
     return (
       <div className="task-summary">
         <p>
-          重置已处理 {s.processed || 0} / {s.total || 0} 篇 · 成功 {s.completed || 0} · 失败{' '}
-          {s.failed || 0} · 清除旧预警 {s.deletedAlerts || 0} 条
+          重置已处理 {s.processed || 0} / {s.total || 0} 篇 · 需预警 {s.warningArticles || 0} 篇 · 无需预警已舍弃 {s.noWarning || 0} 篇 · 失败 {s.modelFailed || s.failed || 0} 篇
         </p>
+        <p>清除旧预警 {s.deletedAlerts || 0} 条 · 重新发布 {s.publishedAlerts || 0} 条（一篇可产生多个对象预警）</p>
       </div>
     );
-  if (s.version !== 2)
+  if (s.version !== 2 && s.version !== 3)
     return (
       <div className="task-summary legacy">
         <p>
@@ -82,7 +84,7 @@ export function TaskSummary({ job }: { job: any }) {
         ) : (
           <>
             <b>
-              采集 {s.collected || 0} − 去重 {s.deduplicated || 0} = 新增 {s.added || 0} 篇
+              采集 {s.collected || 0} − 去重 {s.deduplicated || 0} = 新增待判定 {s.added || 0} 篇
             </b>
             {' '}· 新闻列表读取失败 {s.pageFailed || 0} 页 · 新闻正文读取失败{' '}
             {s.readFailed || 0} 篇 · 发布时间无法确认 {s.dateUnknown || 0} 篇
@@ -90,15 +92,16 @@ export function TaskSummary({ job }: { job: any }) {
         )}
       </p>
       <p>
-        模型分析：需预警 {s.warningArticles || 0} 篇 · 无需预警 {s.noWarning || 0} 篇 ·
+        模型分析：需预警 {s.warningArticles || 0} 篇 · 无需预警已舍弃 {s.noWarning || 0} 篇 ·
         模型失败 {s.modelFailed || 0} 篇 · 待处理／处理中 {s.modelPending || 0} 篇
       </p>
       <p>
-        发布结果：发布预警 {s.publishedAlerts || 0} 条
+        发布结果：新闻入库 {s.warningArticles || 0} 篇 · 发布预警 {s.publishedAlerts || 0} 条（一篇可产生多个对象预警）
       </p>
+      {!!s.readingPending && <small>另有 {s.readingPending} 个链接待读取正文；链接数不代表新增或入库篇数。</small>}
       {s.windowStart && job.kind !== 'model_retry' && (
         <small>
-          {s.mode === 'initial' ? (s.initialDays === 7 ? '首次近一周' : '首次采集') : '增量窗口'}：
+          {s.mode === 'initial' ? (s.initialDays === 3 ? '首次近三天' : '首次采集') : '增量窗口'}：
           {full(s.windowStart)} {s.startInclusive ? '≤' : '＜'} 新闻发布时间 ≤ {full(s.windowEnd)}
         </small>
       )}
@@ -161,10 +164,10 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
           <p>
             {state?.initialized
               ? '上次成功采集截止：' + full(state.lastSuccessEnd)
-              : '尚未完成近一周采集。首次触发时将从当时往前7天开始。'}
+              : '尚未完成所有来源的首次近三天采集；各来源独立补齐失败窗口。'}
           </p>
           <p>
-            模型失败重试只处理已有正文的失败新闻，不重新采集、不清除预警。模型分析重置会清空全部旧预警，需单独确认。
+            模型失败重试使用独立暂存正文。分析重置只重分析已保留的预警新闻，会清空全部旧预警；已舍弃正文不在重置范围。
           </p>
         </div>
         {active && (
@@ -215,6 +218,7 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
           </div>
         </div>
       </div>
+      <FailurePanel blocked={busy || overview?.busy}/>
       <section className="panel">
         <div className="section-heading">
           <h2>任务运行记录</h2>
@@ -377,6 +381,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                 {full(data.job.started_at)}
               </p>
               <TaskSummary job={data.job} />
+              {data.sourceProgress?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> · <Status name={s.status}/><small>{full(s.window_start)} — {full(s.window_end)}</small><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>{s.error&&<p className="error">{s.error}</p>}</div>)}
               <div className="task-filters">
                 <label>
                   记录范围
@@ -422,7 +427,7 @@ function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
                     {data.items.map((i: any, index: number) => (
                       <tr key={i.id || i.news_id || index}>
                         <td className="title-cell">
-                          {i.title || i.url || '—'}
+                          {i.title || i.url || '—'}<small>{i.source_name}</small>
                           {i.url?.startsWith('http') && (
                             <a
                               className="task-source"

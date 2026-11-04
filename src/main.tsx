@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { TaskCenter } from './tasks';
+import { RiskTags, riskNames, type Risk } from './risks';
 type User = { id: number; username: string; role: string };
 type Alert = {
   id: number;
@@ -45,6 +46,7 @@ type Alert = {
     evidence: string;
     summary: string;
     seasoning: boolean;
+    risks?: Risk[];
   };
 };
 async function api(path: string, options: RequestInit = {}) {
@@ -290,6 +292,8 @@ function AlertDetail({ alert }: { alert: Alert }) {
           <p>{a.batch || '以新闻描述的涉事产品为限'}</p>
         </div>
       </div>
+      <RiskTags risks={a.risks}/>
+      {a.risks?.map((r,i)=><p key={i} className="risk-note"><strong>{r.subtype}</strong>：{r.note}</p>)}
       <h4>风险因素</h4>
       <p>{a.factor}</p>
       <h4>可能影响</h4>
@@ -694,6 +698,7 @@ function DashboardFeed({
                 {a.payload.region && <span>{a.payload.region} · </span>}
                 {a.payload.food}
               </h3>
+              <RiskTags risks={a.payload.risks}/>
               <p className="card-factor">{a.payload.factor}</p>
               <p className="card-summary">{a.payload.summary}</p>
               <div className="card-bottom">
@@ -809,6 +814,8 @@ function Admin({ notify }: { notify: (s: string) => void }) {
   const [settings, setSettings] = useState<any>();
   const [detail, setDetail] = useState<any>();
   const [search, setSearch] = useState('');
+  const [newsCategory,setNewsCategory]=useState('');
+  const [newsSource,setNewsSource]=useState('');
   const [page, setPage] = useState(1);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -825,6 +832,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           : { prompt: settings.prompt.content },
         'PUT',
       );
+      if (part === 'crawler') setSettings(await api('/admin/config'));
       if (part === 'prompt') setSettings((s: any) => ({ ...s, prompt: result.prompt }));
       notify(part === 'crawler' ? '采集配置已保存' : '提示词已保存，后续分析生效');
     } catch (e) {
@@ -837,7 +845,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
     try {
       setOverview(await api('/admin/overview'));
       if (tab === 'news')
-        setNews(await api(`/admin/news?page=${page}&search=${encodeURIComponent(search)}`));
+        setNews(await api(`/admin/news?page=${page}&search=${encodeURIComponent(search)}&category=${newsCategory}&source=${encodeURIComponent(newsSource)}`));
       if (tab === 'alerts') setAlerts(await api('/admin/alerts'));
       if (tab === 'users') setUsers(await api('/admin/users'));
       if (tab === 'settings') setSettings(await api('/admin/config'));
@@ -845,7 +853,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [tab, page, search]);
+  }, [tab, page, search, newsCategory, newsSource]);
   useEffect(() => {
     load();
     if (tab === 'overview' || tab === 'news') {
@@ -912,6 +920,8 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               新闻数据库 <span>{news.total} 篇</span>
             </h2>
             <div className="news-toolbar">
+              <select aria-label="风险大类筛选" value={newsCategory} onChange={e=>{setNewsCategory(e.target.value);setPage(1);}}><option value="">全部风险大类</option>{Object.entries(riskNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select>
+              <select aria-label="网站来源筛选" value={newsSource} onChange={e=>{setNewsSource(e.target.value);setPage(1);}}><option value="">全部网站来源</option>{news.sourceOptions?.map((n:string)=><option key={n} value={n}>{n}</option>)}</select>
               <button className="button" onClick={() => setTab('overview')}>
                 前往任务中心
               </button>
@@ -929,6 +939,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               </div>
             </div>
           </div>
+          <p className="muted">这里只保存模型确认需要预警的文章；无需预警正文已舍弃，失败文章请在任务中心重试。</p>
           <div className="table-scroll">
             <table>
               <thead>
@@ -944,6 +955,8 @@ function Admin({ notify }: { notify: (s: string) => void }) {
                   <tr key={n.id}>
                     <td className="title-cell">
                       <strong>{n.title}</strong>
+                      <RiskTags categories={n.categories}/>
+                      <small>{[...new Set(n.sources.map((s:any)=>s.source_name))].join(' · ')}</small>
                       <small>
                         #{n.id} · 收录于 {fmt(n.created_at)}
                       </small>
@@ -1056,14 +1069,15 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           <section className="panel">
             <div className="section-heading">
               <h2>采集配置</h2>
-              <span className="tag green">食品伙伴网</span>
+              <span className="tag green">多来源逐篇分析</span>
             </div>
             <p className="muted">
               自动采集周期：24
-              小时。首次覆盖近一周（7天），后续从上次成功采集截止时刻到本次触发时刻；按窗口自动翻页，不设篇数上限。
+              小时。首次覆盖近三天（72小时），后续从上次成功采集截止时刻到本次触发时刻；按窗口自动翻页，不设篇数上限。
             </p>
+            <div className="source-status-list">{settings.sourceStatus?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> <label className="source-toggle"><input type="checkbox" checked={settings.crawler.sources.includes(s.url)} onChange={e=>setSettings({...settings,crawler:{...settings.crawler,sources:e.target.checked?[...settings.crawler.sources,s.url]:settings.crawler.sources.filter((u:string)=>u!==s.url)}})}/>启用</label><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a><small>上次成功覆盖截止：{fmt(s.last_end)} · 最近结果：{statusNames[s.latest?.status] || s.latest?.status || '尚未采集'}</small>{s.latest?.error&&<p className="error">{s.latest.error}</p>}</div>)}</div>
             <label>
-              来源栏目（每行一个食品伙伴网链接）
+              启用的来源栏目（每行一个受支持网站链接；移除即停用）
               <textarea
                 rows={3}
                 value={settings.crawler.sources.join('\n')}
@@ -1212,18 +1226,18 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           ) : (
             <div className="detail">
               <Status value={detail.status} />
-              <h3>{detail.title}</h3>
+              <h3>{detail.title}</h3><RiskTags categories={detail.categories}/>
               <p className="muted">发布时间：{fmt(detail.published_at)}</p>
               {detail.error && <div className="error">{detail.error}</div>}
               <div className="source-list">
                 {detail.sources.map((s: any) => (
                   <a key={s.url} href={s.url} target="_blank" rel="noreferrer">
-                    {s.url}
+                    {s.source_name} · {s.url}
                     <ArrowUpRight size={16} />
                   </a>
                 ))}
               </div>
-              <h4>新闻正文</h4>
+              <h4>新闻正文（含可解析的原文附件及定位）</h4>
               <pre className="news-body">{detail.body || '正文尚未成功获取'}</pre>
               <h4>分析记录</h4>
               {detail.analyses.map((a: any) => (
@@ -1379,7 +1393,7 @@ function AnalysisResetDialog({
         }}
       >
         <div className="error">
-          此操作将删除全部已生成预警（包括所选时间范围外及已撤下的预警），清除对应已读记录。新闻原文和历史分析记录保留。新预警由模型重新判断后发布。
+          此操作将删除全部已生成预警（包括所选时间范围外及已撤下的预警），清除对应已读记录。仅重新分析已保留的预警新闻；若重新判定无需预警，该新闻正文及分析记录会删除。已舍弃正文的文章不在重置范围。
         </div>
         <label>
           新闻发布时间不早于（北京时间，可选）
@@ -1392,7 +1406,7 @@ function AnalysisResetDialog({
           />
         </label>
         <p className="muted">
-          包含所选时刻；留空则分析全部文章。缺少正文、重复记录不参与；设置时间限制时，没有发布时间的文章也不参与。本操作不重新爬取网页。
+          包含所选时刻；留空则分析全部已保留的预警新闻。无需预警正文已舍弃，不能参与；设置时间限制时，没有发布时间的文章也不参与。本操作不重新爬取网页。
         </p>
         {preview ? (
           <div className="reset-summary">

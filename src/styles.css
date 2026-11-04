@@ -1752,3 +1752,14 @@ td small {
     display: none;
   }
 }
+
+.risk-tags {display:inline-flex;flex-wrap:wrap;gap:6px;margin:6px 0;}
+.risk-biological {background:#f1e8fa;color:#70449b;}
+.risk-chemical {background:#fff0de;color:#9b5813;}
+.risk-physical {background:#e7f0fd;color:#325e9c;}
+.risk-other {background:#eceeef;color:#53616a;}
+.risk-note {font-size:14px;color:var(--text-secondary);}
+.source-status {border:1px solid var(--border,#dce5df);border-radius:10px;padding:14px;margin:10px 0;overflow-wrap:anywhere;}
+.source-status a,.source-status small {display:block;margin-top:5px;}
+.news-toolbar {flex-wrap:wrap;}
+.news-toolbar select {max-width:230px;}

@@ -10,6 +10,11 @@ const alertSchema = z
     advice: z.string().max(1500),
     evidence: z.string().trim().min(4).max(3000),
     seasoning: z.boolean(),
+    risks: z.array(z.object({
+      category: z.enum(['biological', 'chemical', 'physical', 'other']),
+      subtype: z.string().trim().min(1).max(200),
+      note: z.string().trim().min(1).max(1000),
+    }).strict()).min(1).max(12),
   })
   .strict();
 const analysisSchema = z

@@ -12,7 +12,8 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx server/index.ts",
     "init-admin": "tsx server/init-admin.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test tests/pipeline.test.ts"
   },
   "dependencies": {
     "cheerio": "^1.1.2",
@@ -21,8 +22,10 @@
     "helmet": "^8.1.0",
     "iconv-lite": "^0.7.0",
     "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^5.4.624",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.1.0"
   },
   "devDependencies": {
