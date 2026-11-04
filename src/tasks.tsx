@@ -4,17 +4,14 @@ type Props = {
   overview: any;
   busy: boolean;
   onCollect: () => void;
-  onRetry: () => void;
-  onReset: () => void;
 };
 const names: Record<string, string> = {
   idle: '空闲',
   manual: '手动采集',
   scheduled: '自动采集',
-  model_retry: '模型失败重试',
+  model_retry: '暂存区单篇重试',
   crawl_retry: '新闻正文读取失败重试',
   retry: '旧版单篇重试',
-  analysis_reset: '模型分析重置',
   running: '执行中',
   completed: '已完成',
   partial_failed: '部分失败',
@@ -56,15 +53,6 @@ function Status({ name }: { name: string }) {
 }
 export function TaskSummary({ job }: { job: any }) {
   const s = JSON.parse(job.summary || '{}');
-  if (job.kind === 'analysis_reset')
-    return (
-      <div className="task-summary">
-        <p>
-          重置已处理 {s.processed || 0} / {s.total || 0} 篇 · 需预警 {s.warningArticles || 0} 篇 · 无需预警已舍弃 {s.noWarning || 0} 篇 · 失败 {s.modelFailed || s.failed || 0} 篇
-        </p>
-        <p>清除旧预警 {s.deletedAlerts || 0} 条 · 重新发布 {s.publishedAlerts || 0} 条（一篇可产生多个对象预警）</p>
-      </div>
-    );
   if (s.version !== 2 && s.version !== 3)
     return (
       <div className="task-summary legacy">
@@ -108,7 +96,7 @@ export function TaskSummary({ job }: { job: any }) {
     </div>
   );
 }
-export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Props) {
+export function TaskCenter({ overview, busy, onCollect }: Props) {
   const [jobs, setJobs] = useState<any>({ items: [], total: 0 });
   const [page, setPage] = useState(1);
   const [kind, setKind] = useState('');
@@ -136,27 +124,13 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
         <div className="section-heading">
           <div>
             <h2>任务中心</h2>
-            <p>采集、模型失败重试与预警重建统一管理</p>
+            <p>采集任务与处理进度统一管理</p>
           </div>
           <Status name={overview?.busy ? 'running' : 'idle'} />
         </div>
         <div className="task-actions">
           <button className="button primary" disabled={busy || overview?.busy} onClick={onCollect}>
             立即采集
-          </button>
-          <button
-            className="button"
-            disabled={busy || overview?.busy || !overview?.modelFailed}
-            onClick={onRetry}
-          >
-            模型失败重试（{overview?.modelFailed || 0}）
-          </button>
-          <button
-            className="button danger-outline"
-            disabled={busy || overview?.busy}
-            onClick={onReset}
-          >
-            模型分析重置
           </button>
         </div>
         <div className="task-schedule">
@@ -167,7 +141,7 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
               : '尚未完成所有来源的首次近三天采集；各来源独立补齐失败窗口。'}
           </p>
           <p>
-            模型失败重试使用独立暂存正文。分析重置只重分析已保留的预警新闻，会清空全部旧预警；已舍弃正文不在重置范围。
+            模型失败文章请在下方“模型失败暂存区”逐篇重试，使用已保存正文。
           </p>
         </div>
         {active && (
@@ -236,7 +210,7 @@ export function TaskCenter({ overview, busy, onCollect, onRetry, onReset }: Prop
               }}
             >
               <option value="">全部任务</option>
-              {['manual', 'scheduled', 'model_retry', 'crawl_retry', 'analysis_reset'].map((k) => (
+              {['manual', 'scheduled', 'model_retry'].map((k) => (
                 <option key={k} value={k}>
                   {names[k]}
                 </option>

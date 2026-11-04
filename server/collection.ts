@@ -10,10 +10,12 @@ export const crawlState=(db:DB)=>JSON.parse(one(db,"SELECT value FROM settings W
 export function saveCrawlState(db:DB,state:any) {run(db,"INSERT INTO settings VALUES('crawlState',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify(state));}
 export const windowContains=(start:string,end:string,date:string,inclusive:boolean)=>(inclusive?date>=start:date>start)&&date<=end;
 export function createTask(db:DB,kind:string,ids?:number[],end=now(),withinTransaction=false) {
+  if(!['manual','scheduled','model_retry'].includes(kind))throw new Error('不支持的任务类型');
+  if(kind==='model_retry'&&ids?.length!==1)throw new Error('请从失败暂存区选择单篇新闻重试');
   const write=()=>{
     const summary:any={version:3,phase:'streaming',initialDays:3,promptId:one(db,'SELECT id FROM prompts ORDER BY id DESC LIMIT 1')!.id};
     const id=Number(run(db,"INSERT INTO jobs(kind,status,started_at,summary) VALUES(?,'running',?,?)",kind,end,JSON.stringify(summary)).lastInsertRowid);
-    if(kind==='model_retry'||kind==='analysis_reset') {
+    if(kind==='model_retry') {
       for(const itemId of ids||[]) {
         const item=one(db,'SELECT * FROM pipeline_items WHERE id=?',itemId)!;
         const url=one(db,'SELECT * FROM pipeline_urls WHERE item_id=? LIMIT 1',itemId)!;
@@ -52,7 +54,7 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
   run(db,"UPDATE jobs SET status='running',error=NULL,finished_at=NULL WHERE id=?",id);
   // Publication and outcome are committed atomically; reconcile a crash before the job log update.
   for(const item of all(db,"SELECT t.id,p.status,p.news_id FROM task_items t JOIN pipeline_items p ON p.id=t.staging_id WHERE t.job_id=? AND t.model_status IN ('pending','running') AND p.status IN ('warning','no_warning','failed')",id)) {
-    // Explicit retry/reset items are intentionally pending even when the old outcome was failed.
+    // Explicit retry items are intentionally pending even when the old outcome was failed.
     if(item.status==='failed'&&one(db,'SELECT model_status FROM task_items WHERE id=?',item.id)!.model_status==='pending')continue;
     run(db,'UPDATE task_items SET model_status=?,news_id=?,analysis_id=(SELECT id FROM analyses WHERE news_id=? ORDER BY id DESC LIMIT 1),error=(SELECT error FROM pipeline_items WHERE id=(SELECT staging_id FROM task_items WHERE id=?)) WHERE id=?',item.status,item.news_id,item.news_id,item.id,item.id);
   }

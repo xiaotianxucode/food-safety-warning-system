@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { all, one, run, transaction, now, type DB } from './db.js';
+import { one, run, transaction, now, type DB } from './db.js';
 import { DEFAULT_PROMPT } from './prompt.js';
-import { callModel, modelName } from './model.js';
+import { callModel } from './model.js';
 import { DEFAULT_SOURCES, fetchHtml } from './crawler.js';
 import { createTask, executeTask, crawlState, saveCrawlState } from './collection.js';
 import { pipelineSchema, pause } from './pipeline.js';
@@ -40,41 +40,16 @@ export class Worker {
     });
   }
   private release(){run(this.db,"DELETE FROM locks WHERE name='worker' AND owner=?",this.owner);}
-  resetPreview(since?:string){
-    return {eligible:one(this.db,"SELECT COUNT(*) AS count FROM news WHERE trim(body)<>''"+(since?' AND published_at>=?':''),...(since?[since]:[]))!.count,
-      articles:one(this.db,'SELECT COUNT(*) AS count FROM news')!.count,alerts:one(this.db,'SELECT COUNT(*) AS count FROM alerts')!.count,
-      since:since||null,promptId:one(this.db,'SELECT id FROM prompts ORDER BY id DESC LIMIT 1')!.id,model:modelName(),modelConfigured:this.canAnalyze()};
-  }
-  resetAnalysis(since?:string){
-    if(!this.canAnalyze())throw new Error('请先配置模型 API 密钥');
-    if(this.hasUnfinishedTask()||!this.acquire())return;
-    try{
-      const result=transaction(this.db,()=>{
-        const preview=this.resetPreview(since);if(!preview.eligible)throw new Error('所选范围没有可重新分析的预警新闻');
-        run(this.db,'DELETE FROM reads');run(this.db,'DELETE FROM alerts');
-        setSetting(this.db,'feedGeneration',JSON.parse(one(this.db,"SELECT value FROM settings WHERE key='feedGeneration'")?.value||'0')+1);
-        const ids:number[]=[];
-        for(const n of all(this.db,"SELECT * FROM news WHERE trim(body)<>''"+(since?' AND published_at>=?':''),...(since?[since]:[]))){
-          const item=one(this.db,'SELECT id FROM pipeline_items WHERE news_id=?',n.id)!;
-          run(this.db,"UPDATE pipeline_items SET body=?,title=?,status='pending',prompt_id=?,attempts=0,error=NULL WHERE id=?",n.body,n.title,preview.promptId,item.id);ids.push(item.id);
-        }
-        const jobId=createTask(this.db,'analysis_reset',ids,now(),true);
-        run(this.db,'UPDATE jobs SET summary=? WHERE id=?',JSON.stringify({...JSON.parse(one(this.db,'SELECT summary FROM jobs WHERE id=?',jobId)!.summary),...preview,total:ids.length,deletedAlerts:preview.alerts}),jobId);
-        return {jobId,...preview,total:ids.length,deletedAlerts:preview.alerts};
-      });
-      this.runActive(result.jobId);return result;
-    }catch(e){this.release();throw e;}
-  }
   launch(kind='manual',retryId?:number){
+    if(!['manual','scheduled','retry'].includes(kind))return false;
+    if(kind==='retry'&&(this.hasUnfinishedTask()||!retryId||!one(this.db,"SELECT id FROM pipeline_items WHERE id=? AND status='failed' AND trim(body)<>''",retryId)))return false;
     if(!this.canAnalyze()||!this.acquire())return false;
     try {
       const unfinished=one(this.db,"SELECT id FROM jobs WHERE status IN ('running','interrupted') ORDER BY id LIMIT 1");
       let id=unfinished?.id;
       if(!id){
         let ids:number[]|undefined;
-        if(kind==='retry'||kind==='model_retry'){
-          ids=retryId?[retryId]:all(this.db,"SELECT id FROM pipeline_items WHERE status='failed' AND trim(body)<>''").map(i=>i.id);kind='model_retry';
-        }
+        if(kind==='retry'){ids=[retryId!];kind='model_retry';}
         id=createTask(this.db,kind,ids);
       }
       this.runActive(id);return true;

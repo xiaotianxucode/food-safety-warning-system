@@ -260,8 +260,6 @@ export function createApp(db: DB, worker = new Worker(db)) {
       crawlFailed: one(db, "SELECT COUNT(DISTINCT url) AS count FROM task_items WHERE result IN ('read_failed','date_unknown')")!.count,
       crawlState: crawlState(db),
       jobs: all(db, 'SELECT * FROM jobs ORDER BY id DESC LIMIT 30'),
-      latestReset:
-        one(db, "SELECT * FROM jobs WHERE kind='analysis_reset' ORDER BY id DESC LIMIT 1") || null,
     }),
   );
   app.get('/api/admin/jobs', (req, res) => {
@@ -294,43 +292,12 @@ export function createApp(db: DB, worker = new Worker(db)) {
     const job = one(db, 'SELECT * FROM jobs WHERE id=?', parseId(req.params.id));
     if (!job) return res.status(404).json({ error: '任务不存在' });
     const page = z.coerce.number().int().min(1).default(1).parse(req.query.page);
-    const reset = false;
     const scope = z.enum(['window', 'outside', 'all']).default('window').parse(req.query.scope);
-    const filter = reset
-      ? scope === 'outside'
-        ? ' AND 1=0'
-        : ''
-      : scope === 'window'
-      ? " AND i.result<>'outside'"
-      : scope === 'outside'
-      ? " AND i.result='outside'"
-      : '';
-    const totals = reset
-      ? {
-          all: one(db, 'SELECT COUNT(*) AS count FROM reanalysis_queue WHERE job_id=?', job.id)!
-            .count,
-          outside: 0,
-        }
-      : one(
-          db,
-          "SELECT COUNT(*) AS 'all',COALESCE(SUM(result='outside'),0) AS outside FROM task_items WHERE job_id=?",
-          job.id,
-        )!;
+    const filter = scope === 'window' ? " AND i.result<>'outside'" : scope === 'outside' ? " AND i.result='outside'" : '';
+    const totals = one(db,"SELECT COUNT(*) AS 'all',COALESCE(SUM(result='outside'),0) AS outside FROM task_items WHERE job_id=?",job.id)!;
     res.json({
       job,
-      items: reset
-        ? all(
-            db,
-            `SELECT q.news_id,n.title,q.status AS result,q.error,q.status AS model_status,NULL AS url FROM reanalysis_queue q JOIN news n ON n.id=q.news_id WHERE job_id=? ${filter} ORDER BY q.news_id LIMIT 50 OFFSET ?`,
-            job.id,
-            (page - 1) * 50,
-          )
-        : all(
-            db,
-            `SELECT i.* FROM task_items i WHERE job_id=? ${filter} ORDER BY i.id LIMIT 50 OFFSET ?`,
-            job.id,
-            (page - 1) * 50,
-          ),
+      items: all(db,`SELECT i.* FROM task_items i WHERE job_id=? ${filter} ORDER BY i.id LIMIT 50 OFFSET ?`,job.id,(page-1)*50),
       total:
         scope === 'all'
           ? totals.all
@@ -369,47 +336,12 @@ export function createApp(db: DB, worker = new Worker(db)) {
     if(worker.hasUnfinishedTask()||!worker.launch('retry',id))return res.status(409).json({error:'模型未配置或已有任务执行中'});
     res.status(202).json({jobId:worker.jobId});
   });
-  const parseSince = (value: unknown) => {
-    const result = z.iso.datetime({ offset: true }).optional().parse(value);
-    return result ? new Date(result).toISOString() : undefined;
-  };
-  app.get('/api/admin/analysis-reset/preview', (req, res) =>
-    res.json(worker.resetPreview(parseSince(req.query.since))),
-  );
-  app.post('/api/admin/analysis-reset', (req, res) => {
-    const input = z
-      .object({ confirmed: z.literal(true), since: z.iso.datetime({ offset: true }).optional() })
-      .parse(req.body);
-    const since = parseSince(input.since);
-    const preview = worker.resetPreview(since);
-    if (!preview.modelConfigured)
-      return res.status(400).json({ error: '请先配置模型 API 密钥，未清除任何预警' });
-    if (!preview.eligible)
-      return res.status(400).json({ error: '所选范围内没有正文完整的可分析文章，未清除任何预警' });
-    const result = worker.resetAnalysis(since);
-    if (!result)
-      return res
-        .status(409)
-        .json({ error: '已有采集、分析或待恢复的重置任务，请等待完成后再操作' });
-    res.status(202).json(result);
-  });
   app.post('/api/admin/collect', (_req, res) => {
     if (!worker.canAnalyze()) return res.status(400).json({error:'请先配置模型 API 密钥，采集后将逐篇立即分析'});
     if (worker.hasUnfinishedTask() || !worker.launch())
       return res.status(409).json({ error: '已有任务执行中或待恢复，请等待完成' });
     res.status(202).json({ jobId: worker.jobId, message: '采集任务已提交' });
   });
-  app.post('/api/admin/retry-failed', (_req, res) => {
-    if (!worker.canAnalyze()) return res.status(400).json({ error: '请先配置模型 API 密钥' });
-    if (!one(db, "SELECT id FROM pipeline_items WHERE status='failed' AND trim(body)<>'' LIMIT 1"))
-      return res.status(400).json({ error: '没有可重试的模型失败新闻' });
-    if (worker.hasUnfinishedTask() || !worker.launch('model_retry'))
-      return res.status(409).json({ error: '已有任务执行中，请等待完成' });
-    res.status(202).json({ jobId: worker.jobId });
-  });
-  app.post('/api/admin/news/:id/retry', (_req, res) =>
-    res.status(410).json({ error: '失败重试已移至任务中心暂存区；重新判断已入库新闻请使用模型分析重置。' }),
-  );
   app.get('/api/admin/alerts', (_req, res) =>
     res.json(
       all(

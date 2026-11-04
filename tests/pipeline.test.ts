@@ -82,10 +82,10 @@ test('发布事务提交后、任务日志更新前崩溃，不会重复分析�
  run(d,"INSERT INTO task_items(job_id,url,staging_id,result,model_status) VALUES(?,?,?,'new','running')",job,'https://news.foodmate.net/2026/11/1.html',item.id);await analyzeStaged(d,item.id,async()=>warning as any);run(d,"UPDATE task_pages SET status='completed' WHERE job_id=?",job);
  await execute(d,job,async()=>{throw new Error('不应重新获取');},async()=>{throw new Error('不应再次分析');});assert.equal(taskProgress(d,job).warningArticles,1);assert.equal(one(d,'SELECT COUNT(*) n FROM alerts')!.n,1);d.close();
 });
-test('重置后无预警会删除新闻与对应预警；清库迁移只执行一次',async()=>{
+test('后续启动不再清库，新闻和预警发布序号保留',async()=>{
  const d=db();const item=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',one(d,'SELECT MAX(id) id FROM prompts')!.id);await analyzeStaged(d,item.id,async()=>warning as any);
- const max=one(d,'SELECT MAX(id) id FROM alerts')!.id;initialize(d);assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,1);
- const worker=new Worker(d,async()=>'',async()=>noWarning);const result=worker.resetAnalysis();assert.ok(result);await worker.stop();assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,0);assert.equal(one(d,'SELECT COUNT(*) n FROM alerts')!.n,0);assert.equal(one(d,'SELECT seq FROM sqlite_sequence WHERE name=\'alerts\'')!.seq,max);d.close();
+ const max=one(d,'SELECT MAX(id) id FROM alerts')!.id;initialize(d);assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,1);assert.equal(one(d,'SELECT MAX(id) id FROM alerts')!.id,max);
+ const worker=new Worker(d,async()=>'',async()=>noWarning);assert.equal(worker.launch('analysis_reset'),false);assert.equal(worker.launch('model_retry'),false);assert.equal(worker.launch('retry'),false);d.close();
 });
 test('新来源适配、重庆JS附件链接、分页与跨域限制',()=>{
  assert.throws(()=>canonicalUrl('http://127.0.0.1/'));assert.throws(()=>canonicalUrl('https://scjgj.cq.gov.cn:3000/'));
@@ -106,6 +106,24 @@ test('文本型PDF保留页码定位，扫描件不能凭空生成证据',async(
  const xref=Buffer.byteLength(pdf);pdf+=`xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(o=>String(o).padStart(10,'0')+' 00000 n ').join('\n')}\ntrailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n${xref}\n%%EOF`;
  const extracted=await attachmentText(Buffer.from(pdf),'https://scjgj.cq.gov.cn/a.pdf');assert.match(extracted,/第1页/);assert.match(extracted,/Strawberry pesticide/);
  await assert.rejects(()=>attachmentText(Buffer.from('invalid pdf'),'https://scjgj.cq.gov.cn/b.pdf'));
+});
+test('移除重置与批量重试接口，仅允许失败暂存区单篇重试',async()=>{
+ const d=db();const prompt=one(d,'SELECT MAX(id) id FROM prompts')!.id;
+ const saved=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',prompt);await analyzeStaged(d,saved.id,async()=>warning as any);
+ const failed=stageArticle(d,article(body+'另一篇固定新闻的附加说明。'),'https://news.foodmate.net/2026/11/2.html',prompt);await analyzeStaged(d,failed.id,async()=>{throw new Error('固定失败');});
+ run(d,"INSERT INTO users(username,password_hash,role,created_at) VALUES('developer-fixture',?,'developer',?)",hashPassword('fixture-only-password'),now());
+ const worker=new Worker(d,async()=>'',async()=>warning as any);const server=createApp(d,worker).listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));const base=`http://127.0.0.1:${(server.address() as any).port}/api/admin`;
+ try{
+  const login=await fetch(base.replace('/admin','')+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'developer-fixture',password:'fixture-only-password'})});
+  const headers={Cookie:login.headers.get('set-cookie')!.split(';')[0],'Content-Type':'application/json'};
+  for(const [path,method] of [['/analysis-reset/preview','GET'],['/analysis-reset','POST'],['/retry-failed','POST']]){
+   const r=await fetch(base+path,{method,headers,...(method==='POST'?{body:JSON.stringify({confirmed:true})}:{})});assert.equal(r.status,404);
+  }
+  assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,1);assert.equal(one(d,'SELECT COUNT(*) n FROM alerts')!.n,1);
+  const items:any=await(await fetch(base+'/failures',{headers})).json();assert.equal(items.items[0].id,failed.id);
+  const retry=await fetch(base+`/failures/${failed.id}/retry`,{method:'POST',headers,body:'{}'});assert.equal(retry.status,202);await worker.stop();
+  assert.equal(one(d,'SELECT status FROM pipeline_items WHERE id=?',failed.id)!.status,'warning');assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,2);assert.equal(one(d,'SELECT COUNT(*) n FROM alerts')!.n,2);
+ }finally{await worker.stop();await new Promise<void>(r=>server.close(()=>r()));d.close();}
 });
 test('账号登录、普通用户角色越权及发布后的已读/提醒接口',async()=>{
  const d=db();run(d,"INSERT INTO users(username,password_hash,role,created_at) VALUES('fixture',?,'user',?)",hashPassword('fixture-only-password'),now());

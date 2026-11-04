@@ -90,7 +90,6 @@ const statusNames: Record<string, string> = {
   scheduled: '定时采集',
   manual: '手动采集',
   retry: '失败重试',
-  analysis_reset: '模型分析重置',
   model_retry: '模型失败重试',
   crawl_retry: '新闻正文读取失败重试',
   scanning: '扫描栏目',
@@ -102,7 +101,6 @@ const statusNames: Record<string, string> = {
   read_failed: '新闻正文读取失败',
   warning: '需要预警',
   none: '未投入分析',
-  reset_excluded: '未纳入本次重置',
 };
 function Modal({
   title,
@@ -821,7 +819,6 @@ function Admin({ notify }: { notify: (s: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [createUser, setCreateUser] = useState(false);
   const [resetUser, setResetUser] = useState<any>();
-  const [resetOpen, setResetOpen] = useState(false);
   const saveSettings = async (part: 'crawler' | 'prompt') => {
     setBusy(true);
     try {
@@ -909,8 +906,6 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           overview={overview}
           busy={busy}
           onCollect={() => action(() => send('/admin/collect'), '采集任务已提交')}
-          onRetry={() => action(() => send('/admin/retry-failed'), '模型失败重试任务已提交')}
-          onReset={() => setResetOpen(true)}
         />
       )}
       {tab === 'news' && (
@@ -1257,18 +1252,6 @@ function Admin({ notify }: { notify: (s: string) => void }) {
           )}
         </Modal>
       )}
-      {resetOpen && (
-        <AnalysisResetDialog
-          onClose={() => setResetOpen(false)}
-          onStarted={(result) => {
-            setResetOpen(false);
-            notify(
-              `重置任务 #${result.jobId} 已开始，已清除 ${result.deletedAlerts} 条旧预警，将重新分析 ${result.total} 篇文章。`,
-            );
-            load();
-          }}
-        />
-      )}
       {(createUser || resetUser) && (
         <Modal
           title={resetUser ? `重置密码 · ${resetUser.username}` : '创建账号'}
@@ -1331,133 +1314,6 @@ function Admin({ notify }: { notify: (s: string) => void }) {
         </Modal>
       )}
     </>
-  );
-}
-function AnalysisResetDialog({
-  onClose,
-  onStarted,
-}: {
-  onClose: () => void;
-  onStarted: (result: any) => void;
-}) {
-  const [since, setSince] = useState('');
-  const [confirmed, setConfirmed] = useState(false);
-  const [preview, setPreview] = useState<any>();
-  const [error, setError] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const sinceIso = since ? new Date(`${since}+08:00`).toISOString() : undefined;
-  useEffect(() => {
-    let current = true;
-    setPreview(undefined);
-    setConfirmed(false);
-    setError('');
-    api(
-      '/admin/analysis-reset/preview' + (sinceIso ? '?since=' + encodeURIComponent(sinceIso) : ''),
-    )
-      .then((data) => {
-        if (current) setPreview(data);
-      })
-      .catch((e) => {
-        if (current) setError(e.message);
-      });
-    return () => {
-      current = false;
-    };
-  }, [sinceIso]);
-  return (
-    <Modal
-      title="模型分析重置"
-      onClose={() => {
-        if (!submitting) onClose();
-      }}
-    >
-      <form
-        className="detail reset-form"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (!confirmed) return;
-          setSubmitting(true);
-          setError('');
-          try {
-            onStarted(
-              await send('/admin/analysis-reset', {
-                confirmed: true,
-                ...(sinceIso ? { since: sinceIso } : {}),
-              }),
-            );
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setSubmitting(false);
-          }
-        }}
-      >
-        <div className="error">
-          此操作将删除全部已生成预警（包括所选时间范围外及已撤下的预警），清除对应已读记录。仅重新分析已保留的预警新闻；若重新判定无需预警，该新闻正文及分析记录会删除。已舍弃正文的文章不在重置范围。
-        </div>
-        <label>
-          新闻发布时间不早于（北京时间，可选）
-          <input
-            type="datetime-local"
-            aria-label="重新分析的新闻发布时间下限"
-            value={since}
-            disabled={submitting}
-            onChange={(e) => setSince(e.target.value)}
-          />
-        </label>
-        <p className="muted">
-          包含所选时刻；留空则分析全部已保留的预警新闻。无需预警正文已舍弃，不能参与；设置时间限制时，没有发布时间的文章也不参与。本操作不重新爬取网页。
-        </p>
-        {preview ? (
-          <div className="reset-summary">
-            <span>
-              将删除全部预警 <strong>{preview.alerts}</strong> 条
-            </span>
-            <span>
-              将重新分析 <strong>{preview.eligible}</strong> / {preview.articles} 篇文章
-            </span>
-            <span>
-              使用提示词 v{preview.promptId} · {preview.model}
-            </span>
-          </div>
-        ) : (
-          <p className="muted">正在统计影响范围…</p>
-        )}
-        {preview && !preview.eligible && (
-          <div className="notice">当前范围内没有可分析文章，请调整时间；不会清除预警。</div>
-        )}
-        {preview && !preview.modelConfigured && (
-          <div className="error">请先配置模型 API 密钥。</div>
-        )}
-        <label className="confirm-reset">
-          <input
-            type="checkbox"
-            aria-label="确认删除全部预警并重新分析"
-            checked={confirmed}
-            disabled={submitting}
-            onChange={(e) => setConfirmed(e.target.checked)}
-          />
-          我确认删除全部预警，并按以上范围重新分析
-        </label>
-        {error && (
-          <div className="error" role="alert">
-            {error}
-          </div>
-        )}
-        <div className="form-actions">
-          <button type="button" className="button" disabled={submitting} onClick={onClose}>
-            取消
-          </button>
-          <button
-            type="submit"
-            className="button danger"
-            disabled={submitting || !confirmed || !preview?.eligible || !preview?.modelConfigured}
-          >
-            {submitting ? '正在提交…' : '确认重置并重新分析'}
-          </button>
-        </div>
-      </form>
-    </Modal>
   );
 }
 function Status({ value }: { value: string }) {
