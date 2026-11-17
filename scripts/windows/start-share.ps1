@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
-Set-Location -LiteralPath $PSScriptRoot
-$shareRoot = $PSScriptRoot
+$shareRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location -LiteralPath $shareRoot
 $shareDirectory = Join-Path $shareRoot '.share'
 $shareExecutable = Join-Path $shareRoot '.tools\cloudflared.exe'
 $shareStateFile = Join-Path $shareDirectory 'state.json'

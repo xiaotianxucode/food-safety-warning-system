@@ -35,7 +35,7 @@ export function pipelineSchema(db: DB) {
   add('pipeline_items','attachments',"TEXT NOT NULL DEFAULT '[]'");
 }
 
-export function stageArticle(db:DB, article:Article, url:string, promptId:number,withinTransaction=false) {
+export function stageArticle(db:DB, article:Article, url:string, promptId:number,withinTransaction=false, name=sourceName(url)) {
   url = canonicalUrl(url);
   const write=()=>{
     const hash = fingerprint(article.body);
@@ -45,8 +45,8 @@ export function stageArticle(db:DB, article:Article, url:string, promptId:number
       hash,article.title,article.body,article.publishedAt,promptId,now(),now()).lastInsertRowid);
     if(!existing)run(db,'UPDATE pipeline_items SET attachments=? WHERE id=?',JSON.stringify(article.attachments),id);
     run(db,'INSERT INTO pipeline_urls(url,item_id,title,source_name,published_at) VALUES(?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET item_id=excluded.item_id,title=excluded.title,source_name=excluded.source_name,published_at=excluded.published_at',
-      url,id,article.title,sourceName(url),article.publishedAt);
-    if (existing?.news_id) run(db,'INSERT OR IGNORE INTO sources(news_id,url,title,source_name) VALUES(?,?,?,?)',existing.news_id,url,article.title,sourceName(url));
+      url,id,article.title,name,article.publishedAt);
+    if (existing?.news_id) run(db,'INSERT OR IGNORE INTO sources(news_id,url,title,source_name) VALUES(?,?,?,?)',existing.news_id,url,article.title,name);
     return {id,inserted:!existing};
   };
   return withinTransaction?write():transaction(db,write);

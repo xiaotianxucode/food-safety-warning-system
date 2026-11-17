@@ -8,7 +8,7 @@ import { hashPassword, verifyPassword, sessionToken, tokenHash } from './auth.js
 import { config, initialize, Worker, setSetting } from './service.js';
 import { canonicalUrl } from './crawler.js';
 import { callModel, modelName } from './model.js';
-import { SOURCE_DEFINITIONS, sourceName } from './source-registry.js';
+import { sourceCatalog, sourceName } from './source-registry.js';
 import { crawlState, refreshSchedule } from './collection.js';
 import { failureCounts } from './failure-counts.js';
 declare global {
@@ -335,6 +335,7 @@ export function createApp(db: DB, worker = new Worker(db)) {
     res.status(202).json({jobId:worker.jobId});
   });
   app.post('/api/admin/collect', (_req, res) => {
+    if (!config(db).sources.length) return res.status(400).json({error:'请先启用至少一个采集来源'});
     if (!worker.canAnalyze()) return res.status(400).json({error:'请先配置模型 API 密钥，采集后将逐篇立即分析'});
     if (worker.hasUnfinishedTask() || !worker.launch())
       return res.status(409).json({ error: '已有任务执行中或待恢复，请等待完成' });
@@ -358,7 +359,11 @@ export function createApp(db: DB, worker = new Worker(db)) {
   app.get('/api/admin/config', (_req, res) =>
     res.json({
       crawler: config(db),
-      sourceStatus: [...new Set<string>([...SOURCE_DEFINITIONS.map(s=>s.url),...config(db).sources])].map((url:string)=>({url,name:sourceName(url),enabled:config(db).sources.includes(url),...one(db,'SELECT last_end,next_run_at FROM source_states WHERE url=?',url),latest:one(db,'SELECT * FROM job_sources WHERE url=? ORDER BY job_id DESC LIMIT 1',url)||null})),
+      sourceStatus: sourceCatalog(db).map(({url,name}) => ({
+        url, name, enabled: config(db).sources.includes(url),
+        ...one(db,'SELECT last_end,next_run_at FROM source_states WHERE url=?',url),
+        latest: one(db,'SELECT * FROM job_sources WHERE url=? ORDER BY job_id DESC LIMIT 1',url)||null,
+      })),
       prompt: one(db, 'SELECT * FROM prompts ORDER BY id DESC LIMIT 1'),
       model: {
         name: modelName(),
@@ -367,37 +372,41 @@ export function createApp(db: DB, worker = new Worker(db)) {
       },
     }),
   );
+  const sourceUrl = z.string().trim().max(2048).url().refine((url) => {
+    try {
+      canonicalUrl(url);
+      return true;
+    } catch {
+      return false;
+    }
+  }, '请输入已支持网站的 HTTP 或 HTTPS 栏目网址').transform((url) => canonicalUrl(url));
   app.put('/api/admin/config', (req, res) => {
     const input = z
       .object({
         crawler: z
           .object({
-            sources: z
-              .array(
-                z
-                  .string()
-                  .url()
-                  .refine((u) => {
-                    try {
-                      canonicalUrl(u);
-                      return true;
-                    } catch {
-                      return false;
-                    }
-                  }, '仅支持食品伙伴网、中国食品安全网、中国调味品协会和重庆市场监管局网址')
-                  .transform((u) => canonicalUrl(u)),
-              )
-              .min(1)
-              .max(10),
+            sources: z.array(sourceUrl).max(100),
+            catalog: z.array(z.object({ url: sourceUrl, name: z.string().trim().min(1).max(100) })).max(100).optional(),
           })
           .optional(),
         prompt: z.string().min(100).max(30000).optional(),
       })
       .refine((v) => v.crawler !== undefined || v.prompt !== undefined, '至少提交采集配置或提示词')
       .parse(req.body);
+    const selected = input.crawler && [...new Set(input.crawler.sources)];
+    const catalog = input.crawler?.catalog ?? sourceCatalog(db);
+    const urls = new Set(catalog.map(({url}) => url));
+    if (input.crawler?.catalog && (urls.size !== catalog.length ||
+        new Set(catalog.map(({name}) => name)).size !== catalog.length))
+      return res.status(400).json({error:'来源名称和栏目网址均不能重复'});
+    if (input.crawler?.catalog && selected?.some((url) => !urls.has(url)))
+      return res.status(400).json({error:'只能启用列表中存在的栏目'});
     transaction(db, () => {
-      if (input.crawler) {
-        setSetting(db, 'crawler', { intervalHours: 24, sources: [...new Set(input.crawler.sources)] });
+      if (selected) {
+        setSetting(db, 'crawler', {
+          intervalHours: 24, sources: selected,
+          catalog: [...catalog, ...selected.filter((url) => !urls.has(url)).map((url) => ({url, name: sourceName(url)}))],
+        });
         refreshSchedule(db);
       }
       const old = one(db, 'SELECT content FROM prompts ORDER BY id DESC LIMIT 1');

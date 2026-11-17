@@ -1,3 +1,7 @@
+import { one, type DB } from './db.js';
+
+export type SourceEntry = { url: string; name: string };
+
 export const SOURCE_DEFINITIONS = [
   { url: 'https://news.foodmate.net/', name: '食品伙伴网·食品资讯', adapter: 'foodmate' },
   { url: 'https://fsc.foodmate.net/', name: '食品伙伴网·食品安全', adapter: 'foodmate' },
@@ -17,3 +21,11 @@ export function sourceDefinition(url: string) {
   return { url, name: '食品伙伴网', adapter: 'foodmate' };
 }
 export function sourceName(url: string) { return sourceDefinition(url).name; }
+
+export function sourceCatalog(db: DB): SourceEntry[] {
+  const crawler = JSON.parse(one(db, "SELECT value FROM settings WHERE key='crawler'")!.value);
+  return crawler.catalog ?? [...new Set<string>([
+    ...SOURCE_DEFINITIONS.map((source) => source.url),
+    ...crawler.sources,
+  ])].map((url) => ({ url, name: sourceName(url) }));
+}

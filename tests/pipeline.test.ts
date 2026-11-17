@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase,all,one,run,now } from '../server/db.js';
 import {initialize,Worker,setSetting} from '../server/service.js';
-import {createTask,executeTask,taskProgress,crawlState,refreshSchedule,DAY} from '../server/collection.js';
+import {automaticDue,createTask,executeTask,taskProgress,crawlState,refreshSchedule,DAY} from '../server/collection.js';
 import {stageArticle,analyzeStaged,attachmentText} from '../server/pipeline.js';
 import {validateAnalysis} from '../server/model.js';
 import {extractListing,extractArticle,canonicalUrl} from '../server/crawler.js';
@@ -211,6 +211,42 @@ test('移除重置与批量重试接口，仅允许失败暂存区单篇重试',
   assert.equal(one(d,'SELECT status FROM pipeline_items WHERE id=?',failed.id)!.status,'warning');assert.equal(one(d,'SELECT COUNT(*) n FROM news')!.n,2);assert.equal(one(d,'SELECT COUNT(*) n FROM alerts')!.n,2);
  }finally{await worker.stop();await new Promise<void>(r=>server.close(()=>r()));d.close();}
 });
+test('保存采集来源的增删改与启用状态，空选择暂停采集', async () => {
+  const d = db();
+  run(d, "INSERT INTO users(username,password_hash,role,created_at) VALUES('source-fixture',?,'developer',?)", hashPassword('fixture-only-password'), now());
+  const server = createApp(d).listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}/api`;
+  try {
+    const login = await fetch(base + '/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'source-fixture', password: 'fixture-only-password' }),
+    });
+    const headers = { Cookie: login.headers.get('set-cookie')!.split(';')[0], 'Content-Type': 'application/json' };
+    const read = async () => (await (await fetch(base + '/admin/config', { headers })).json() as any).sourceStatus;
+    const save = (catalog: {url: string; name: string}[], sources: string[]) => fetch(base + '/admin/config', {
+      method: 'PUT', headers, body: JSON.stringify({ crawler: { catalog, sources } }),
+    });
+    assert.ok((await read()).some((source: any) => source.url === ROOT && source.enabled));
+    const added = {url: 'https://news.foodmate.net/guoji/', name: '国际食品资讯'};
+    assert.equal((await save([{url: ROOT, name: '国内食品资讯'}, added], [added.url])).status, 200);
+    const task = createTask(d, 'manual', undefined, END);
+    assert.deepEqual(all(d, 'SELECT url,name FROM job_sources WHERE job_id=?', task).map(({url,name}) => ({url,name})), [added]);
+    assert.equal((await save([{url: 'http://127.0.0.1/', name: '无效来源'}], [])).status, 400);
+    const renamed = {...added, name: '国际食品安全资讯'};
+    assert.equal((await save([renamed], [])).status, 200);
+    assert.deepEqual((await read()).map(({url,name,enabled}: any) => ({url,name,enabled})), [{...renamed, enabled: false}]);
+    assert.equal(automaticDue(d, new Date(Date.parse(END) + 2 * DAY).toISOString()), false);
+    assert.equal((await fetch(base + '/admin/collect', {method: 'POST', headers, body: '{}'})).status, 400);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    d.close();
+  }
+});
+
 test('账号登录、普通用户角色越权及发布后的已读/提醒接口',async()=>{
  const d=db();run(d,"INSERT INTO users(username,password_hash,role,created_at) VALUES('fixture',?,'user',?)",hashPassword('fixture-only-password'),now());
  const item=stageArticle(d,article(),'https://news.foodmate.net/2026/11/1.html',one(d,'SELECT MAX(id) id FROM prompts')!.id);await analyzeStaged(d,item.id,async()=>warning as any);

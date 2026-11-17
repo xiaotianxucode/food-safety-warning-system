@@ -106,10 +106,12 @@ function Modal({
   title,
   onClose,
   children,
+  compact = false,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
+  compact?: boolean;
 }) {
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
@@ -127,7 +129,7 @@ function Modal({
   return (
     <div className="overlay" onClick={onClose}>
       <section
-        className="modal"
+        className={compact ? 'modal modal-compact' : 'modal'}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -263,6 +265,23 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
 }
 function AlertDetail({ alert }: { alert: Alert }) {
   const a = alert.payload;
+  const fields: [string, React.ReactNode][] = [
+    ['事件摘要', a.summary],
+    ['涉及企业', a.company || '原文未明确'],
+    ['涉及批次 / 范围', a.batch || '以新闻描述的涉事产品为限'],
+    ['风险分类', a.risks?.length ? (
+      <>
+        <RiskTags risks={a.risks} />
+        {a.risks.map((risk, index) => (
+          <p key={index}><strong>{risk.subtype}</strong>：{risk.note}</p>
+        ))}
+      </>
+    ) : '原文未明确'],
+    ['风险因素', a.factor],
+    ['影响', a.impact || '原文未明确'],
+    ['关注事项', a.advice || '关注后续监管通报及涉事产品信息'],
+  ];
+  if (alert.title) fields.unshift(['相关新闻', alert.title]);
   return (
     <div className="detail">
       <div className="tag-row">
@@ -273,31 +292,20 @@ function AlertDetail({ alert }: { alert: Alert }) {
       <h3>
         {a.region} {a.food}
       </h3>
-      {alert.title && (
-        <>
-          <h4>相关新闻</h4>
-          <p>{alert.title}</p>
-        </>
-      )}
-      <p className="summary">{a.summary}</p>
-      <div className="detail-grid">
-        <div>
-          <label>涉及企业</label>
-          <p>{a.company || '原文未明确'}</p>
-        </div>
-        <div>
-          <label>涉及批次 / 范围</label>
-          <p>{a.batch || '以新闻描述的涉事产品为限'}</p>
-        </div>
-      </div>
-      <RiskTags risks={a.risks}/>
-      {a.risks?.map((r,i)=><p key={i} className="risk-note"><strong>{r.subtype}</strong>：{r.note}</p>)}
-      <h4>风险因素</h4>
-      <p>{a.factor}</p>
-      <h4>可能影响</h4>
-      <p>{a.impact || '原文未明确'}</p>
-      <h4>关注事项</h4>
-      <p>{a.advice || '关注后续监管通报及涉事产品信息'}</p>
+      <table className="alert-detail-table" aria-label="预警分析信息">
+        <colgroup>
+          <col className="alert-detail-label" />
+          <col />
+        </colgroup>
+        <tbody>
+          {fields.map(([label, value]) => (
+            <tr key={label}>
+              <th scope="row">{label}</th>
+              <td>{value}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
       <blockquote>
         <span>原文证据</span>
         {a.evidence}
@@ -344,7 +352,7 @@ function DashboardFeed({
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<Alert | null>(null);
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useState<'all' | 'unread'>('all');
   const [draftDates, setDraftDates] = useState(dates);
   const alertUrl = useCallback(
     (paging: Record<string, string | number> = {}) => {
@@ -429,10 +437,9 @@ function DashboardFeed({
       window.removeEventListener('online', refresh);
     };
   }, [refresh]);
-  const items: Alert[] = data.items.filter(
-    (a: Alert) =>
-      (filter !== 'unread' || !a.is_read) && (filter !== 'seasoning' || a.payload.seasoning),
-  );
+  const items: Alert[] = filter === 'unread'
+    ? data.items.filter((a: Alert) => !a.is_read)
+    : data.items;
   useEffect(() => {
     const timer = setInterval(() => {
       const node = cards.current;
@@ -486,65 +493,7 @@ function DashboardFeed({
           <span className="muted">
             <Clock3 size={15} /> 每 {data.intervalHours || 24} 小时自动采集
           </span>
-          <button className="button" onClick={refresh}>
-            <RefreshCw size={15} />
-            刷新动态
-          </button>
         </div>
-      </div>
-      <section className="hero">
-        <div className="hero-text">
-          <span className="hero-kicker">
-            <Radio size={14} /> 食品安全情报监测
-          </span>
-          <h2>
-            读懂资讯背后的
-            <br />
-            食品安全信号<span>。</span>
-          </h2>
-          <p>
-            追踪监管、抽检与供应链动态，
-            <br />
-            聚焦具体食品，呈现有依据的风险分析。
-          </p>
-          <div className="hero-footer">
-            <span>
-              <Check size={14} /> 新闻持续汇集
-            </span>
-            <span>
-              <Check size={14} /> 智能辅助分析
-            </span>
-            <span>
-              <Check size={14} /> 新增合并提醒
-            </span>
-          </div>
-        </div>
-        <div className="hero-art">
-          <div className="radar">
-            <div className="radar-core">
-              <ShieldCheck size={50} />
-            </div>
-            <span className="radar-dot dot1" />
-            <span className="radar-dot dot2" />
-            <span className="radar-dot dot3" />
-          </div>
-          <div className="radar-caption">
-            <span className="pulse" /> RISK SIGNAL MONITORING
-          </div>
-        </div>
-      </section>
-      <div className="metrics">
-        <Metric icon={<Bell />} label="待阅读预警" value={data.unread} suffix="条" accent />
-        <Metric icon={<ShieldCheck />} label="近期已载入" value={data.items.length} suffix="条" />
-        <Metric icon={<Clock3 />} label="最近消息发布" value={fmt(data.lastPublished)} />
-        <Metric
-          icon={<RefreshCw />}
-          label="最近采集状态"
-          value={
-            data.lastJob ? statusNames[data.lastJob.status] || data.lastJob.status : '等待首次采集'
-          }
-          sub={fmt(data.lastJob?.finished_at || data.lastJob?.started_at)}
-        />
       </div>
       <section className="feed">
         <div className="section-heading">
@@ -593,23 +542,12 @@ function DashboardFeed({
         </div>
         <div className="feed-toolbar">
           <div className="tabs">
-            {[
-              ['all', '全部预警'],
-              ['unread', '未读消息'],
-              ['seasoning', '调味品相关'],
-            ].map(([v, l]) => (
-              <button key={v} className={filter === v ? 'active' : ''} onClick={() => setFilter(v)}>
-                {l}
-                <b>
-                  {v === 'all'
-                    ? data.counts?.total ?? data.items.length
-                    : v === 'seasoning'
-                    ? data.counts?.seasoning ??
-                      data.items.filter((a: Alert) => a.payload.seasoning).length
-                    : data.filteredUnread ?? data.unread}
-                </b>
-              </button>
-            ))}
+            <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>
+              全部预警 <b>{data.counts?.total ?? data.items.length}</b>
+            </button>
+            <button className={filter === 'unread' ? 'active' : ''} onClick={() => setFilter('unread')}>
+              未读预警 <b>{data.filteredUnread ?? data.unread}</b>
+            </button>
           </div>
           <form
             className="date-filter"
@@ -623,6 +561,7 @@ function DashboardFeed({
             <span>发布时间</span>
             <input
               type="date"
+              data-empty={!draftDates.start}
               aria-label="开始日期"
               value={draftDates.start}
               max={draftDates.end || undefined}
@@ -631,6 +570,7 @@ function DashboardFeed({
             <span>至</span>
             <input
               type="date"
+              data-empty={!draftDates.end}
               aria-label="结束日期"
               value={draftDates.end}
               min={draftDates.start || undefined}
@@ -766,6 +706,60 @@ function DashboardFeed({
           <span>最近采集：{fmt(data.lastJob?.finished_at)}</span>
         </div>
       </section>
+      <div className="metrics">
+        <Metric icon={<Bell />} label="待阅读预警" value={data.unread} suffix="条" accent />
+        <Metric icon={<ShieldCheck />} label="近期已载入" value={data.items.length} suffix="条" />
+        <Metric icon={<Clock3 />} label="最近消息发布" value={fmt(data.lastPublished)} />
+        <Metric
+          icon={<RefreshCw />}
+          label="最近采集状态"
+          value={
+            data.lastJob ? statusNames[data.lastJob.status] || data.lastJob.status : '等待首次采集'
+          }
+          sub={fmt(data.lastJob?.finished_at || data.lastJob?.started_at)}
+        />
+      </div>
+      <section className="hero">
+        <div className="hero-text">
+          <span className="hero-kicker">
+            <Radio size={14} /> 食品安全情报监测
+          </span>
+          <h2>
+            读懂资讯背后的
+            <br />
+            食品安全信号<span>。</span>
+          </h2>
+          <p>
+            追踪监管、抽检与供应链动态，
+            <br />
+            聚焦具体食品，呈现有依据的风险分析。
+          </p>
+          <div className="hero-footer">
+            <span>
+              <Check size={14} /> 新闻持续汇集
+            </span>
+            <span>
+              <Check size={14} /> 智能辅助分析
+            </span>
+            <span>
+              <Check size={14} /> 新增合并提醒
+            </span>
+          </div>
+        </div>
+        <div className="hero-art">
+          <div className="radar">
+            <div className="radar-core">
+              <ShieldCheck size={50} />
+            </div>
+            <span className="radar-dot dot1" />
+            <span className="radar-dot dot2" />
+            <span className="radar-dot dot3" />
+          </div>
+          <div className="radar-caption">
+            <span className="pulse" /> RISK SIGNAL MONITORING
+          </div>
+        </div>
+      </section>
       {detail && (
         <Modal title="预警分析详情" onClose={() => setDetail(null)}>
           <AlertDetail alert={detail} />
@@ -803,11 +797,107 @@ function Metric({
     </div>
   );
 }
+const alertsPerPage = 15;
+
+type CollectionSource = {
+  url: string;
+  name: string;
+  enabled: boolean;
+  last_end?: string;
+  latest?: { status: string; error?: string };
+};
+
+function CollectionSources({
+  sources,
+  busy,
+  onChange,
+  onSave,
+}: {
+  sources: CollectionSource[];
+  busy: boolean;
+  onChange: (sources: CollectionSource[]) => void;
+  onSave: () => void;
+}) {
+  const [editor, setEditor] = useState<{ index: number; name: string; url: string } | null>(null);
+  const closeEditor = useCallback(() => setEditor(null), []);
+  const duplicate = editor && sources.some((source, index) =>
+    index !== editor.index && (source.url === editor.url.trim() || source.name === editor.name.trim()),
+  );
+
+  return (
+    <>
+      <p className="muted">勾选要采集的栏目，保存后生效。支持食品伙伴网、中国食品安全网、中国调味品协会和重庆市市场监督管理局的栏目网址。</p>
+      <div className="source-status-list">
+        {sources.map((source, index) => (
+          <div className="source-status" key={source.url}>
+            <div className="source-row">
+              <label className="source-toggle">
+                <input
+                  type="checkbox"
+                  checked={source.enabled}
+                  disabled={busy}
+                  onChange={(e) => onChange(sources.map((entry, i) =>
+                    i === index ? { ...entry, enabled: e.target.checked } : entry,
+                  ))}
+                />
+                {source.name}
+              </label>
+              <div className="table-actions">
+                <button className="text-button" disabled={busy} onClick={() => setEditor({ index, name: source.name, url: source.url })}>编辑</button>
+                <button className="text-button red" disabled={busy} onClick={() => {
+                  if (confirm(`从采集列表删除「${source.name}」？`)) onChange(sources.filter((_, i) => i !== index));
+                }}>删除</button>
+              </div>
+            </div>
+            <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>
+            <small>上次成功覆盖截止：{fmt(source.last_end)} · 最近结果：{statusNames[source.latest?.status ?? ''] || source.latest?.status || '尚未采集'}</small>
+            {source.latest?.error && <details><summary>查看失败原因</summary><p className="error">{source.latest.error}</p></details>}
+          </div>
+        ))}
+        {!sources.length && <p className="muted">暂无采集来源</p>}
+      </div>
+      <div className="form-actions">
+        <button className="button" disabled={busy} onClick={() => setEditor({ index: -1, name: '', url: '' })}>添加来源</button>
+        <button className="button primary" disabled={busy} onClick={onSave}>保存采集配置</button>
+      </div>
+      {editor && (
+        <Modal compact title={editor.index === -1 ? '添加采集来源' : '编辑采集来源'} onClose={closeEditor}>
+          <form className="detail" onSubmit={(e) => {
+            e.preventDefault();
+            const previous = sources[editor.index];
+            const url = editor.url.trim();
+            const entry = {
+              ...(previous?.url === url ? previous : {}),
+              url,
+              name: editor.name.trim(),
+              enabled: previous?.enabled ?? true,
+            };
+            onChange(previous ? sources.map((source, i) => i === editor.index ? entry : source) : [...sources, entry]);
+            setEditor(null);
+          }}>
+            <label>来源名称<input value={editor.name} required maxLength={100} onChange={(e) => setEditor({ ...editor, name: e.target.value })} /></label>
+            <label>栏目网址<input type="url" pattern="https?://.+" value={editor.url} required maxLength={2048} onChange={(e) => setEditor({ ...editor, url: e.target.value })} /></label>
+            {duplicate && <p className="error">来源名称和栏目网址均不能重复。</p>}
+            <div className="form-actions"><button className="button primary" type="submit" disabled={!!duplicate || !editor.name.trim()}>确定</button></div>
+          </form>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function Admin({ notify }: { notify: (s: string) => void }) {
   const [tab, setTab] = useState('overview');
   const [overview, setOverview] = useState<any>();
   const [news, setNews] = useState<any>({ items: [], total: 0 });
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertPage, setAlertPage] = useState(1);
+  const alertPageCount = Math.max(1, Math.ceil(alerts.length / alertsPerPage));
+  const currentAlertPage = Math.min(alertPage, alertPageCount);
+  const visibleAlerts = alerts.slice(
+    (currentAlertPage - 1) * alertsPerPage,
+    currentAlertPage * alertsPerPage,
+  );
   const [users, setUsers] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>();
   const [detail, setDetail] = useState<any>();
@@ -825,11 +915,17 @@ function Admin({ notify }: { notify: (s: string) => void }) {
       const result = await send(
         '/admin/config',
         part === 'crawler'
-          ? { crawler: { sources: settings.crawler.sources } }
+          ? { crawler: {
+              sources: settings.sourceStatus.filter((source: CollectionSource) => source.enabled).map((source: CollectionSource) => source.url),
+              catalog: settings.sourceStatus.map(({ url, name }: CollectionSource) => ({ url, name })),
+            } }
           : { prompt: settings.prompt.content },
         'PUT',
       );
-      if (part === 'crawler') setSettings(await api('/admin/config'));
+      if (part === 'crawler') {
+        const saved = await api('/admin/config');
+        setSettings((current: any) => ({ ...current, crawler: saved.crawler, sourceStatus: saved.sourceStatus }));
+      }
       if (part === 'prompt') setSettings((s: any) => ({ ...s, prompt: result.prompt }));
       notify(part === 'crawler' ? '采集配置已保存' : '提示词已保存，后续分析生效');
     } catch (e) {
@@ -910,20 +1006,17 @@ function Admin({ notify }: { notify: (s: string) => void }) {
       )}
       {tab === 'news' && (
         <section className="panel">
-          <div className="section-heading">
+          <div className="section-heading news-heading">
             <h2>
               新闻数据库 <span>{news.total} 篇</span>
             </h2>
             <div className="news-toolbar">
               <select aria-label="风险大类筛选" value={newsCategory} onChange={e=>{setNewsCategory(e.target.value);setPage(1);}}><option value="">全部风险大类</option>{Object.entries(riskNames).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select>
               <select aria-label="网站来源筛选" value={newsSource} onChange={e=>{setNewsSource(e.target.value);setPage(1);}}><option value="">全部网站来源</option>{news.sourceOptions?.map((n:string)=><option key={n} value={n}>{n}</option>)}</select>
-              <button className="button" onClick={() => setTab('overview')}>
-                前往任务中心
-              </button>
-
               <div className="search">
-                <Search size={16} />
+                <Search size={16} aria-hidden="true" />
                 <input
+                  aria-label="搜索新闻标题"
                   value={search}
                   placeholder="搜索新闻标题"
                   onChange={(e) => {
@@ -1005,7 +1098,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
         <section className="panel">
           <div className="section-heading">
             <h2>预警与来源追溯</h2>
-            <span className="muted">最近 300 条</span>
+            <span className="muted">最近 {alerts.length} 条 · 每页 {alertsPerPage} 条</span>
           </div>
           <div className="table-scroll">
             <table>
@@ -1018,7 +1111,7 @@ function Admin({ notify }: { notify: (s: string) => void }) {
                 </tr>
               </thead>
               <tbody>
-                {alerts.map((a) => (
+                {visibleAlerts.map((a) => (
                   <tr key={a.id}>
                     <td>
                       <strong>
@@ -1057,6 +1150,25 @@ function Admin({ notify }: { notify: (s: string) => void }) {
             </table>
           </div>
           {!alerts.length && <Empty text="暂无已生成的预警" />}
+          {alertPageCount > 1 && (
+            <nav className="pagination" aria-label="预警管理分页">
+              <button
+                className="button"
+                disabled={currentAlertPage === 1}
+                onClick={() => setAlertPage(currentAlertPage - 1)}
+              >
+                上一页
+              </button>
+              <span>第 {currentAlertPage} / {alertPageCount} 页</span>
+              <button
+                className="button"
+                disabled={currentAlertPage === alertPageCount}
+                onClick={() => setAlertPage(currentAlertPage + 1)}
+              >
+                下一页
+              </button>
+            </nav>
+          )}
         </section>
       )}
       {tab === 'settings' && settings && (
@@ -1070,31 +1182,12 @@ function Admin({ notify }: { notify: (s: string) => void }) {
               自动采集周期：24
               小时。每个网站首次覆盖近三天（72小时），后续从该网站上次成功采集截止到本次触发时刻；各网站范围在任务详情分别记录。
             </p>
-            <div className="source-status-list">{settings.sourceStatus?.map((s:any)=><div className="source-status" key={s.url}><strong>{s.name}</strong> <label className="source-toggle"><input type="checkbox" checked={settings.crawler.sources.includes(s.url)} onChange={e=>setSettings({...settings,crawler:{...settings.crawler,sources:e.target.checked?[...settings.crawler.sources,s.url]:settings.crawler.sources.filter((u:string)=>u!==s.url)}})}/>启用</label><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a><small>上次成功覆盖截止：{fmt(s.last_end)} · 最近结果：{s.latest?.status==='failed'?'采集失败':statusNames[s.latest?.status] || s.latest?.status || '尚未采集'}</small>{s.latest?.error&&<details><summary>查看失败原因</summary><p className="error">{s.latest.error}</p></details>}</div>)}</div>
-            <label>
-              启用的来源栏目（每行一个受支持网站链接；移除即停用）
-              <textarea
-                rows={3}
-                value={settings.crawler.sources.join('\n')}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    crawler: { ...settings.crawler, sources: e.target.value.split('\n') },
-                  })
-                }
-              />
-            </label>
-            <p className="muted">遇到访问限制会记录失败；已采集正文按指纹合并，保留各来源链接。</p>
-            <div className="form-actions">
-              <button
-                type="button"
-                className="button primary"
-                disabled={busy}
-                onClick={() => saveSettings('crawler')}
-              >
-                保存采集配置
-              </button>
-            </div>
+            <CollectionSources
+              sources={settings.sourceStatus}
+              busy={busy}
+              onChange={(sourceStatus) => setSettings((current: any) => ({ ...current, sourceStatus }))}
+              onSave={() => saveSettings('crawler')}
+            />
           </section>
           <section className="panel">
             <div className="section-heading">

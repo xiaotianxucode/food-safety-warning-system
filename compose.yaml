@@ -1,6 +1,8 @@
 services:
   food-safety:
-    build: .
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
     init: true
     restart: unless-stopped
     ports:

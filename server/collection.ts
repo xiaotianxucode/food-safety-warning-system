@@ -2,7 +2,7 @@ import { all, one, run, transaction, now, type DB } from './db.js';
 import { extractArticle, extractPublication, extractListing, fetchHtml } from './crawler.js';
 import { analyzeStaged, stageArticle, enrichArticle, pause } from './pipeline.js';
 import { callModel } from './model.js';
-import { sourceName } from './source-registry.js';
+import { sourceCatalog, sourceName } from './source-registry.js';
 export const DAY=86400_000;
 export const INITIAL_DAYS=3;
 export const weekBefore=(end:string)=>new Date(Date.parse(end)-INITIAL_DAYS*DAY).toISOString();
@@ -10,6 +10,7 @@ export const crawlState=(db:DB)=>JSON.parse(one(db,"SELECT value FROM settings W
 export function saveCrawlState(db:DB,state:any) {run(db,"INSERT INTO settings VALUES('crawlState',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify(state));}
 export const windowContains=(start:string,end:string,date:string,inclusive:boolean)=>(inclusive?date>=start:date>start)&&date<=end;
 export function automaticDue(db:DB,at=now()) {
+  if (!JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value).sources.length) return false;
   const state=crawlState(db);
   const due=state.lastRunAt?Date.parse(state.lastRunAt)+DAY:Date.parse(state.nextRunAt);
   return Number.isFinite(due)&&Date.parse(at)>=due;
@@ -42,12 +43,13 @@ export function createTask(db:DB,kind:string,ids?:number[],end=now(),withinTrans
       }
     } else {
       const cfg=JSON.parse(one(db,"SELECT value FROM settings WHERE key='crawler'")!.value);
+      const names = new Map(sourceCatalog(db).map(({url, name}) => [url, name]));
       for(const url of cfg.sources) {
         const state=one(db,'SELECT * FROM source_states WHERE url=?',url);
         const start=state?.last_end||state?.initial_start||weekBefore(end);
         const mode=state?.last_attempt_end||state?.last_end?'incremental':'initial';
         run(db,'INSERT OR IGNORE INTO source_states(url,next_run_at,initial_start) VALUES(?,?,?)',url,end,start);
-        run(db,'INSERT INTO job_sources(job_id,url,name,window_start,window_end,start_inclusive,mode) VALUES(?,?,?,?,?,?,?)',id,url,sourceName(url),start,end,state?.last_end?0:1,mode);
+        run(db,'INSERT INTO job_sources(job_id,url,name,window_start,window_end,start_inclusive,mode) VALUES(?,?,?,?,?,?,?)',id,url,names.get(url) ?? sourceName(url),start,end,state?.last_end?0:1,mode);
         run(db,'INSERT INTO task_pages(job_id,url,source_url) VALUES(?,?,?)',id,url,url);
       }
       saveCrawlState(db,{...crawlState(db),scheduleVersion:2,lastRunAt:end,nextRunAt:new Date(Date.parse(end)+DAY).toISOString()});
@@ -106,7 +108,7 @@ export async function executeTask(db:DB,id:number,hooks:Hooks) {
         if(!inside){run(db,"UPDATE task_items SET result='outside',title=?,published_at=? WHERE id=?",article.title,article.publishedAt,item.id);return;}
         article=await (hooks.enrich||enrichArticle)(article);
         const staged=transaction(db,()=>{
-          const staged=stageArticle(db,article!,item.url,summary.promptId,true);
+          const staged=stageArticle(db,article!,item.url,summary.promptId,true,source.name);
           run(db,'UPDATE task_items SET result=?,title=?,published_at=?,staging_id=?,model_status=?,error=NULL WHERE id=?',staged.inserted?'new':'duplicate',article!.title,article!.publishedAt,staged.id,staged.inserted?'pending':'none',item.id);
           return staged;
         });
